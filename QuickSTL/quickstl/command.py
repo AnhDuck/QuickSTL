@@ -145,9 +145,10 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
         cmd.destroy.add(on_destroy)
         STATE.handlers.append(on_destroy)
         try:
-            on_mouse = CommandMouseMoveHandler()
-            cmd.mouseMove.add(on_mouse)
-            STATE.handlers.append(on_mouse)
+            if CommandMouseMoveHandler:
+                on_mouse = CommandMouseMoveHandler()
+                cmd.mouseMove.add(on_mouse)
+                STATE.handlers.append(on_mouse)
         except Exception:
             pass
         try:
@@ -329,13 +330,16 @@ class CommandDestroyHandler(adsk.core.CommandEventHandler):
             log(f"Command destroy error: {exc}")
 
 
-class CommandMouseMoveHandler(adsk.core.MouseEventHandler):
-    def notify(self, args: adsk.core.MouseEventArgs):
-        try:
-            if STATE.idle_monitor:
-                STATE.idle_monitor.record_interaction("mouse_move", "")
-        except Exception as exc:
-            log(f"Mouse move error: {exc}")
+try:
+    class CommandMouseMoveHandler(adsk.core.MouseEventHandler):
+        def notify(self, args: adsk.core.MouseEventArgs):
+            try:
+                if STATE.idle_monitor:
+                    STATE.idle_monitor.record_interaction("mouse_move", "")
+            except Exception as exc:
+                log(f"Mouse move error: {exc}")
+except Exception:
+    CommandMouseMoveHandler = None
 
 
 class CommandActivateHandler(adsk.core.CommandEventHandler):

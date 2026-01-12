@@ -8,13 +8,16 @@ from .logging_utils import log
 from .ui_helpers import find_input
 
 
-class IdleEventHandler(adsk.core.IdleEventHandler):
-    def __init__(self, monitor):
-        super().__init__()
-        self._monitor = monitor
+try:
+    class IdleEventHandler(adsk.core.IdleEventHandler):
+        def __init__(self, monitor):
+            super().__init__()
+            self._monitor = monitor
 
-    def notify(self, args: adsk.core.IdleEventArgs):
-        self._monitor.tick()
+        def notify(self, args: adsk.core.IdleEventArgs):
+            self._monitor.tick()
+except Exception:
+    IdleEventHandler = None
 
 
 class IdleMonitor:
@@ -91,7 +94,7 @@ class IdleMonitor:
     def _ensure_idle_handler(self):
         try:
             app = adsk.core.Application.get()
-            if not self._idle_handler:
+            if not self._idle_handler and IdleEventHandler:
                 self._idle_handler = IdleEventHandler(self)
                 app.idle.add(self._idle_handler)
         except Exception as exc:
