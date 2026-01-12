@@ -3,6 +3,8 @@ import adsk.core
 
 from .config import get_doc_folder, resolve_export_dir, save_config, set_doc_folder
 from .constants import ADDIN_NAME, ADDIN_VERSION, CMD_ID, CMD_NAME, QUALITY_CHOICES, SLICER_CHOICES
+from .diagnostics import append_debug_event
+from .idle import IdleMonitor
 from .dialogs import pick_file_dialog, pick_folder_dialog
 from .export import do_export_to_path, export_and_send, handle_export_error
 from .logging_utils import log
@@ -96,7 +98,18 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             clicks_tb.isFullWidth = True
         except Exception:
             pass
-        diag_btn = g3c.addBoolValueInput("diagBtn", "Diagnostics", False, "", False)
+        diag_btn = g3c.addBoolValueInput("diagBtn", "Debug", False, "", False)
+        idle_timer = g3c.addTextBoxCommandInput(
+            "idleCountdown",
+            "Auto-close in",
+            "",
+            1,
+            True,
+        )
+        try:
+            idle_timer.isFullWidth = True
+        except Exception:
+            pass
 
         try:
             folder_disp.tooltip = "This folder is saved for THIS document. Use “Browse…” to change."
@@ -116,8 +129,9 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             export_btn.tooltip = "Export STL and show a success toast with live preview."
             send_btn.tooltip = "Export STL, then launch and focus the slicer. No toast unless it fails."
             clicks_tb.tooltip = "Estimated clicks saved (assumes 5 per export or send)."
-            diag_btn.tooltip = "Open quickstl_diag.json (last export/send details)."
-            cmd.tooltip = f"Quick STL v{ADDIN_VERSION} — OBJ→STL quality + diagnostics."
+            diag_btn.tooltip = "Open debug.json (export history, idle state, errors)."
+            idle_timer.tooltip = "Debug countdown to auto-close (resets on interaction)."
+            cmd.tooltip = f"Quick STL v{ADDIN_VERSION} — OBJ→STL quality + debug info."
         except Exception:
             pass
 
@@ -127,6 +141,27 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
         on_exec = CommandExecuteHandler()
         cmd.execute.add(on_exec)
         STATE.handlers.append(on_exec)
+        on_destroy = CommandDestroyHandler()
+        cmd.destroy.add(on_destroy)
+        STATE.handlers.append(on_destroy)
+        try:
+            on_mouse = CommandMouseMoveHandler()
+            cmd.mouseMove.add(on_mouse)
+            STATE.handlers.append(on_mouse)
+        except Exception:
+            pass
+        try:
+            on_activate = CommandActivateHandler()
+            cmd.activate.add(on_activate)
+            STATE.handlers.append(on_activate)
+        except Exception:
+            pass
+
+        if STATE.idle_monitor:
+            STATE.idle_monitor.stop("command_reopened")
+        STATE.command = cmd
+        STATE.idle_monitor = IdleMonitor()
+        STATE.idle_monitor.start(cmd, inputs)
 
 
 class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
@@ -134,6 +169,8 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
         try:
             ip = args.input
             inputs = args.inputs
+            if STATE.idle_monitor and ip and ip.id != "idleCountdown":
+                STATE.idle_monitor.record_interaction("input_changed", ip.id)
 
             if ip.id == "browseBtn":
                 chosen = pick_folder_dialog("Choose export folder (saved for this document)")
@@ -247,18 +284,18 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
 
             elif ip.id == "diagBtn":
                 try:
-                    from .paths import diag_path
+                    from .paths import debug_path
 
-                    path = diag_path()
+                    path = debug_path()
                     if os.path.isfile(path):
                         os.startfile(path)
                     else:
                         STATE.ui.messageBox(
-                            "No diagnostics file found yet.\n\nExport once to generate quickstl_diag.json.",
+                            "No debug file found yet.\n\nExport once to generate debug.json.",
                             f"{ADDIN_NAME} v{ADDIN_VERSION}",
                         )
                 except Exception as exc:
-                    log(f"Diagnostics open failed: {exc}")
+                    log(f"Debug open failed: {exc}")
                 b = adsk.core.BoolValueCommandInput.cast(ip)
                 if b:
                     b.value = False
@@ -274,8 +311,40 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             pref = adsk.core.BoolValueCommandInput.cast(find_input(inputs, "preferSel"))
             STATE.config["prefer_selection"] = bool(pref.value) if pref else True
             save_config()
+            if STATE.idle_monitor:
+                STATE.idle_monitor.record_interaction("execute", "ok")
         except Exception as exc:
             log(f"Execute (OK) error: {exc}")
+
+
+class CommandDestroyHandler(adsk.core.CommandEventHandler):
+    def notify(self, args: adsk.core.CommandEventArgs):
+        try:
+            if STATE.idle_monitor:
+                STATE.idle_monitor.stop("command_destroyed")
+                STATE.idle_monitor = None
+            STATE.command = None
+            append_debug_event("ui", "Command destroyed", {"command": CMD_ID})
+        except Exception as exc:
+            log(f"Command destroy error: {exc}")
+
+
+class CommandMouseMoveHandler(adsk.core.MouseEventHandler):
+    def notify(self, args: adsk.core.MouseEventArgs):
+        try:
+            if STATE.idle_monitor:
+                STATE.idle_monitor.record_interaction("mouse_move", "")
+        except Exception as exc:
+            log(f"Mouse move error: {exc}")
+
+
+class CommandActivateHandler(adsk.core.CommandEventHandler):
+    def notify(self, args: adsk.core.CommandEventArgs):
+        try:
+            if STATE.idle_monitor:
+                STATE.idle_monitor.record_interaction("activate", "")
+        except Exception as exc:
+            log(f"Command activate error: {exc}")
 
 
 def ensure_removed(ui: adsk.core.UserInterface, cid: str) -> None:

@@ -1,5 +1,6 @@
 ADDIN_NAME = "Quick STL"
 ADDIN_VERSION = "3.00.0"
+IDLE_TIMEOUT_S = 30
 
 CMD_ID = "quickstl_export_cmd"
 CMD_NAME = "Quick STL"
