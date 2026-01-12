@@ -5,6 +5,7 @@ import adsk.core
 from .command import ensure_removed, wire_commands
 from .config import load_config
 from .constants import ADDIN_NAME, ADDIN_VERSION, CMD_ID, TOAST_ID
+from .diagnostics import cleanup_legacy_debug_files
 from .idle import stop_idle_monitoring, start_idle_monitoring
 from .state import STATE
 
@@ -14,6 +15,7 @@ def run(context):
         STATE.app = adsk.core.Application.get()
         STATE.ui = STATE.app.userInterface
         load_config()
+        cleanup_legacy_debug_files()
         ensure_removed(STATE.ui, CMD_ID)
         wire_commands(STATE.ui)
         start_idle_monitoring(STATE.app)

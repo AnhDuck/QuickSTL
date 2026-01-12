@@ -1,6 +1,6 @@
 import os
 
-from .constants import CONFIG_FILENAME, RES_DIR, TOAST_HTML_FN, TOAST_JSON_FN
+from .constants import CONFIG_FILENAME, DEBUG_FILENAME, RES_DIR, TOAST_HTML_FN, TOAST_JSON_FN
 
 
 def addin_dir() -> str:
@@ -27,9 +27,13 @@ def config_path() -> str:
     return os.path.join(addin_dir(), CONFIG_FILENAME)
 
 
+def debug_path() -> str:
+    return os.path.join(addin_dir(), DEBUG_FILENAME)
+
+
 def diag_path() -> str:
-    return os.path.join(addin_dir(), "quickstl_diag.json")
+    return debug_path()
 
 
 def log_path() -> str:
-    return os.path.join(addin_dir(), "quickstl_errors.log")
+    return debug_path()

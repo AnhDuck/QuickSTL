@@ -4,6 +4,7 @@ ADDIN_VERSION = "3.00.0"
 CMD_ID = "quickstl_export_cmd"
 CMD_NAME = "Quick STL"
 CONFIG_FILENAME = "config.json"
+DEBUG_FILENAME = "quickstl_debug.jsonl"
 
 # Legacy STL path always writes Binary STL
 BINARY_FORMAT = True

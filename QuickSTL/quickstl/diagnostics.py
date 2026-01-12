@@ -6,17 +6,20 @@ from typing import Optional
 from .config import current_doc_key, get_doc_folder
 from .constants import ADDIN_VERSION
 from .logging_utils import log
-from .paths import diag_path
+from .paths import addin_dir, debug_path
 from .state import STATE
 
 
 def write_diag_file(context: dict, open_after: bool = False) -> None:
     try:
-        with open(diag_path(), "w", encoding="utf-8") as handle:
-            json.dump(context, handle, indent=2)
+        if "type" not in context:
+            context["type"] = "diag"
+        with open(debug_path(), "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(context, ensure_ascii=False))
+            handle.write("\n")
         if open_after:
             try:
-                os.startfile(diag_path())
+                os.startfile(debug_path())
             except Exception as exc:
                 log(f"Open diag file failed: {exc}")
     except Exception as exc:
@@ -39,6 +42,7 @@ def snapshot_idle_state() -> dict:
 
 def write_idle_diag(event: str, details: Optional[dict] = None) -> None:
     payload = {
+        "type": "idle",
         "version": ADDIN_VERSION,
         "timestamp": datetime.datetime.now().isoformat(),
         "event": event,
@@ -46,6 +50,21 @@ def write_idle_diag(event: str, details: Optional[dict] = None) -> None:
         "idle_state": snapshot_idle_state(),
     }
     write_diag_file(payload, open_after=False)
+
+
+def cleanup_legacy_debug_files() -> None:
+    try:
+        base = addin_dir()
+        for fname in ("quickstl_diag.json", "quickstl_errors.log"):
+            path = os.path.join(base, fname)
+            if os.path.isfile(path):
+                try:
+                    os.remove(path)
+                    log(f"Removed legacy debug file: {fname}")
+                except Exception as exc:
+                    log(f"Failed to remove legacy debug file {fname}: {exc}")
+    except Exception as exc:
+        log(f"Legacy debug cleanup failed: {exc}")
 
 
 def snapshot_common(

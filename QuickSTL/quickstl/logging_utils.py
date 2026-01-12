@@ -1,13 +1,21 @@
 import datetime
+import json
 
 from .constants import ADDIN_VERSION
-from .paths import log_path
+from .paths import debug_path
 
 
 def log(message: str) -> None:
     try:
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(log_path(), "a", encoding="utf-8") as handle:
-            handle.write(f"[{ts}] v{ADDIN_VERSION} {message}\n")
+        payload = {
+            "type": "log",
+            "timestamp": ts,
+            "version": ADDIN_VERSION,
+            "message": message,
+        }
+        with open(debug_path(), "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False))
+            handle.write("\n")
     except Exception:
         pass

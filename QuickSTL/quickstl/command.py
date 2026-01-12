@@ -2,7 +2,15 @@ import os
 import adsk.core
 
 from .config import get_doc_folder, resolve_export_dir, save_config, set_doc_folder
-from .constants import ADDIN_NAME, ADDIN_VERSION, CMD_ID, CMD_NAME, QUALITY_CHOICES, SLICER_CHOICES
+from .constants import (
+    ADDIN_NAME,
+    ADDIN_VERSION,
+    CMD_ID,
+    CMD_NAME,
+    DEBUG_FILENAME,
+    QUALITY_CHOICES,
+    SLICER_CHOICES,
+)
 from .dialogs import pick_file_dialog, pick_folder_dialog
 from .export import do_export_to_path, export_and_send, handle_export_error
 from .idle import mark_command_active, mark_command_inactive, record_activity
@@ -119,7 +127,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             export_btn.tooltip = "Export STL and show a success toast with live preview."
             send_btn.tooltip = "Export STL, then launch and focus the slicer. No toast unless it fails."
             clicks_tb.tooltip = "Estimated clicks saved (assumes 5 per export or send)."
-            diag_btn.tooltip = "Open quickstl_diag.json (last export/send details)."
+            diag_btn.tooltip = f"Open {DEBUG_FILENAME} (debug + diagnostics)."
             cmd.tooltip = f"Quick STL v{ADDIN_VERSION} — OBJ→STL quality + diagnostics."
         except Exception:
             pass
@@ -261,7 +269,7 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
                         os.startfile(path)
                     else:
                         STATE.ui.messageBox(
-                            "No diagnostics file found yet.\n\nExport once to generate quickstl_diag.json.",
+                            f"No debug file found yet.\n\nExport once to generate {DEBUG_FILENAME}.",
                             f"{ADDIN_NAME} v{ADDIN_VERSION}",
                         )
                 except Exception as exc:
