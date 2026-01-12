@@ -93,6 +93,10 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             "",
             STATE.config.get("auto_close_after_export", True),
         )
+        try:
+            auto_close.isFullWidth = True
+        except Exception:
+            pass
         clicks_tb = g3c.addTextBoxCommandInput(
             "clicksSavedText",
             "",
@@ -324,8 +328,27 @@ def maybe_auto_close(reason: str) -> None:
         return
     try:
         append_debug_event("info", "auto_close_attempt", {"reason": reason})
-        STATE.command.terminate()
-        append_debug_event("info", "auto_close_triggered", {"reason": reason})
+        cmd = STATE.command
+        if hasattr(cmd, "doTerminate"):
+            cmd.doTerminate()
+            append_debug_event("info", "auto_close_triggered", {"reason": reason})
+            return
+        if hasattr(cmd, "terminate"):
+            cmd.terminate()
+            append_debug_event("info", "auto_close_triggered", {"reason": reason})
+            return
+        ui = STATE.ui or adsk.core.Application.get().userInterface
+        active_cmd = getattr(ui, "activeCommand", None)
+        if active_cmd:
+            if hasattr(active_cmd, "doTerminate"):
+                active_cmd.doTerminate()
+                append_debug_event("info", "auto_close_triggered", {"reason": reason})
+                return
+            if hasattr(active_cmd, "terminate"):
+                active_cmd.terminate()
+                append_debug_event("info", "auto_close_triggered", {"reason": reason})
+                return
+        append_debug_event("warning", "auto_close_no_method", {"reason": reason})
     except Exception as exc:
         append_debug_event(
             "error",
