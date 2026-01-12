@@ -1,0 +1,1 @@
+"""QuickSTL add-in package."""
