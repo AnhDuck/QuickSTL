@@ -329,6 +329,24 @@ def maybe_auto_close(reason: str) -> None:
     try:
         append_debug_event("info", "auto_close_attempt", {"reason": reason})
         cmd = STATE.command
+        methods = [
+            name
+            for name in ("doCancel", "cancel", "doTerminate", "terminate", "doExecute")
+            if hasattr(cmd, name)
+        ]
+        append_debug_event(
+            "info",
+            "auto_close_methods",
+            {"reason": reason, "methods": methods},
+        )
+        if hasattr(cmd, "doCancel"):
+            cmd.doCancel()
+            append_debug_event("info", "auto_close_triggered", {"reason": reason})
+            return
+        if hasattr(cmd, "cancel"):
+            cmd.cancel()
+            append_debug_event("info", "auto_close_triggered", {"reason": reason})
+            return
         if hasattr(cmd, "doTerminate"):
             cmd.doTerminate()
             append_debug_event("info", "auto_close_triggered", {"reason": reason})
@@ -337,15 +355,41 @@ def maybe_auto_close(reason: str) -> None:
             cmd.terminate()
             append_debug_event("info", "auto_close_triggered", {"reason": reason})
             return
+        if hasattr(cmd, "doExecute"):
+            cmd.doExecute()
+            append_debug_event("info", "auto_close_triggered", {"reason": reason})
+            return
         ui = STATE.ui or adsk.core.Application.get().userInterface
         active_cmd = getattr(ui, "activeCommand", None)
         if active_cmd:
+            active_methods = [
+                name
+                for name in ("doCancel", "cancel", "doTerminate", "terminate", "doExecute")
+                if hasattr(active_cmd, name)
+            ]
+            append_debug_event(
+                "info",
+                "auto_close_active_methods",
+                {"reason": reason, "methods": active_methods},
+            )
+            if hasattr(active_cmd, "doCancel"):
+                active_cmd.doCancel()
+                append_debug_event("info", "auto_close_triggered", {"reason": reason})
+                return
+            if hasattr(active_cmd, "cancel"):
+                active_cmd.cancel()
+                append_debug_event("info", "auto_close_triggered", {"reason": reason})
+                return
             if hasattr(active_cmd, "doTerminate"):
                 active_cmd.doTerminate()
                 append_debug_event("info", "auto_close_triggered", {"reason": reason})
                 return
             if hasattr(active_cmd, "terminate"):
                 active_cmd.terminate()
+                append_debug_event("info", "auto_close_triggered", {"reason": reason})
+                return
+            if hasattr(active_cmd, "doExecute"):
+                active_cmd.doExecute()
                 append_debug_event("info", "auto_close_triggered", {"reason": reason})
                 return
         append_debug_event("warning", "auto_close_no_method", {"reason": reason})
