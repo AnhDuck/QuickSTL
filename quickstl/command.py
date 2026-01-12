@@ -86,17 +86,6 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
         g3c = g3.children
         send_btn = g3c.addBoolValueInput("sendBtn", "Send to slicer", False, "", False)
         export_btn = g3c.addBoolValueInput("exportBtn", "Export STL", False, "", False)
-        auto_close = g3c.addBoolValueInput(
-            "autoCloseAfterExport",
-            "Auto-close after export/send",
-            True,
-            "",
-            STATE.config.get("auto_close_after_export", True),
-        )
-        try:
-            auto_close.isFullWidth = True
-        except Exception:
-            pass
         clicks_tb = g3c.addTextBoxCommandInput(
             "clicksSavedText",
             "",
@@ -127,7 +116,6 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             browse_slicer.tooltip = "Pick the slicer executable (.exe)."
             export_btn.tooltip = "Export STL and show a success toast with live preview."
             send_btn.tooltip = "Export STL, then launch and focus the slicer. No toast unless it fails."
-            auto_close.tooltip = "When enabled, close Quick STL after export/send."
             clicks_tb.tooltip = "Estimated clicks saved (assumes 5 per export or send)."
             diag_btn.tooltip = "Open debug.json (export history, errors)."
             cmd.tooltip = f"Quick STL v{ADDIN_VERSION} — OBJ→STL quality + debug info."
@@ -240,7 +228,6 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
                     do_export_to_path(
                         folder_override=folder, skip_toast=False, inputs=inputs
                     )
-                    maybe_auto_close("export")
                 except Exception as exc:
                     handle_export_error("Export STL", exc)
 
@@ -260,21 +247,9 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
                         if fld:
                             fld.value = folder
                     set_doc_folder(folder)
-                    if export_and_send(folder_override=folder, inputs=inputs):
-                        maybe_auto_close("send")
+                    export_and_send(folder_override=folder, inputs=inputs)
                 except Exception as exc:
                     handle_export_error("Send to slicer", exc)
-
-            elif ip.id == "autoCloseAfterExport":
-                b = adsk.core.BoolValueCommandInput.cast(ip)
-                if b:
-                    STATE.config["auto_close_after_export"] = bool(b.value)
-                    save_config()
-                    append_debug_event(
-                        "info",
-                        "auto_close_setting_changed",
-                        {"enabled": bool(b.value)},
-                    )
 
             elif ip.id == "diagBtn":
                 try:
@@ -319,86 +294,6 @@ class CommandDestroyHandler(adsk.core.CommandEventHandler):
             log(f"Command destroy error: {exc}")
 
 
-def maybe_auto_close(reason: str) -> None:
-    if not STATE.config.get("auto_close_after_export", True):
-        append_debug_event("info", "auto_close_skipped", {"reason": reason})
-        return
-    if not STATE.command:
-        append_debug_event("warning", "auto_close_missing_command", {"reason": reason})
-        return
-    try:
-        append_debug_event("info", "auto_close_attempt", {"reason": reason})
-        cmd = STATE.command
-        methods = [
-            name
-            for name in ("doCancel", "cancel", "doTerminate", "terminate", "doExecute")
-            if hasattr(cmd, name)
-        ]
-        append_debug_event(
-            "info",
-            "auto_close_methods",
-            {"reason": reason, "methods": methods},
-        )
-        if hasattr(cmd, "doCancel"):
-            cmd.doCancel()
-            append_debug_event("info", "auto_close_triggered", {"reason": reason})
-            return
-        if hasattr(cmd, "cancel"):
-            cmd.cancel()
-            append_debug_event("info", "auto_close_triggered", {"reason": reason})
-            return
-        if hasattr(cmd, "doTerminate"):
-            cmd.doTerminate()
-            append_debug_event("info", "auto_close_triggered", {"reason": reason})
-            return
-        if hasattr(cmd, "terminate"):
-            cmd.terminate()
-            append_debug_event("info", "auto_close_triggered", {"reason": reason})
-            return
-        if hasattr(cmd, "doExecute"):
-            cmd.doExecute()
-            append_debug_event("info", "auto_close_triggered", {"reason": reason})
-            return
-        ui = STATE.ui or adsk.core.Application.get().userInterface
-        active_cmd = getattr(ui, "activeCommand", None)
-        if active_cmd:
-            active_methods = [
-                name
-                for name in ("doCancel", "cancel", "doTerminate", "terminate", "doExecute")
-                if hasattr(active_cmd, name)
-            ]
-            append_debug_event(
-                "info",
-                "auto_close_active_methods",
-                {"reason": reason, "methods": active_methods},
-            )
-            if hasattr(active_cmd, "doCancel"):
-                active_cmd.doCancel()
-                append_debug_event("info", "auto_close_triggered", {"reason": reason})
-                return
-            if hasattr(active_cmd, "cancel"):
-                active_cmd.cancel()
-                append_debug_event("info", "auto_close_triggered", {"reason": reason})
-                return
-            if hasattr(active_cmd, "doTerminate"):
-                active_cmd.doTerminate()
-                append_debug_event("info", "auto_close_triggered", {"reason": reason})
-                return
-            if hasattr(active_cmd, "terminate"):
-                active_cmd.terminate()
-                append_debug_event("info", "auto_close_triggered", {"reason": reason})
-                return
-            if hasattr(active_cmd, "doExecute"):
-                active_cmd.doExecute()
-                append_debug_event("info", "auto_close_triggered", {"reason": reason})
-                return
-        append_debug_event("warning", "auto_close_no_method", {"reason": reason})
-    except Exception as exc:
-        append_debug_event(
-            "error",
-            "auto_close_failed",
-            {"reason": reason, "error": str(exc)},
-        )
 
 
 def ensure_removed(ui: adsk.core.UserInterface, cid: str) -> None:

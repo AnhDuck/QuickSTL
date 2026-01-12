@@ -30,10 +30,6 @@ def load_config() -> None:
                 STATE.config["clicks_saved"], int
             ):
                 STATE.config["clicks_saved"] = 0
-            if "auto_close_after_export" not in STATE.config or not isinstance(
-                STATE.config["auto_close_after_export"], bool
-            ):
-                STATE.config["auto_close_after_export"] = True
             if (
                 "quality" not in STATE.config
                 or STATE.config["quality"] not in QUALITY_CHOICES
