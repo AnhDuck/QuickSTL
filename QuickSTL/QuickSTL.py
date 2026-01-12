@@ -1,0 +1,1006 @@
+# QuickSTL.py — v3.00.0 (Windows-only, JSON-driven toast; OBJ→STL path; diagnostics open-only)
+# - Per-document export folder (DataFile.id preferred, else Document.name)
+# - Send to slicer (OrcaSlicer, SuperSlicer, Bambu Studio)
+# - Toast preview via static HTML + JSON payload + local three.min.js
+# - Clicks saved counter
+# - Mesh Quality dropdown: Legacy (STL Only), Low/Medium/High/VeryHigh/Ultra (OBJ→STL path)
+# - Diagnostics auto-written after Export/Send; "Diagnostics" button now ONLY opens quickstl_diag.json (no writes)
+# - No HTML/JS changes
+
+import adsk.core, adsk.fusion, traceback, os, json, sys, subprocess, datetime, time, re, struct, math, tempfile
+from pathlib import Path
+
+ADDIN_NAME      = 'Quick STL'
+ADDIN_VERSION   = '3.00.0'
+
+CMD_ID          = 'quickstl_export_cmd'
+CMD_NAME        = 'Quick STL'
+CONFIG_FILENAME = 'config.json'
+
+# Legacy STL path always writes Binary STL
+BINARY_FORMAT   = True
+
+# Toast config
+TOAST_ID    = 'quickstl_toast'
+TOAST_TITLE = 'STL Exported'
+TOAST_MS    = 15000
+TOAST_W     = 500
+TOAST_H     = 525
+
+# Resource paths (static HTML + JSON + three.js)
+RES_DIR       = 'resources'
+TOAST_HTML_FN = 'quickstl_toast.html'
+TOAST_JSON_FN = 'quickstl_toast.json'
+PREVIEW_DIR   = 'preview'
+THREE_FILE    = 'three.min.js'
+
+SLICER_CHOICES = ['OrcaSlicer', 'SuperSlicer', 'Bambu Studio']
+
+_app = None
+_ui  = None
+_handlers = []
+_busy = False
+
+_config = {
+    "export_dir": "",
+    "prefer_selection": True,
+    "per_doc_folders": {},
+    "clicks_saved": 0,
+    "quality": "Legacy",   # Legacy uses STL Only; other presets use OBJ→STL
+    "slicer": {
+        "name": "OrcaSlicer",
+        "paths": { name: "" for name in SLICER_CHOICES }
+    }
+}
+
+# -------- paths / logging --------
+def _addin_dir() -> str:
+    return os.path.dirname(os.path.realpath(__file__))
+
+def _res_path(*parts) -> str:
+    return os.path.join(_addin_dir(), RES_DIR, *parts)
+
+def _toast_html_path() -> str:
+    return _res_path(TOAST_HTML_FN)
+
+def _toast_json_path() -> str:
+    return _res_path(TOAST_JSON_FN)
+
+def _icon_folder() -> str:
+    return os.path.join(_addin_dir(), 'resources', 'QuickSTL')
+
+def _config_path() -> str:
+    return os.path.join(_addin_dir(), CONFIG_FILENAME)
+
+def _diag_path() -> str:
+    return os.path.join(_addin_dir(), 'quickstl_diag.json')
+
+def _log_path() -> str:
+    return os.path.join(_addin_dir(), 'quickstl_errors.log')
+
+def _log(msg: str):
+    try:
+        ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        with open(_log_path(), 'a', encoding='utf-8') as f:
+            f.write(f'[{ts}] v{ADDIN_VERSION} {msg}\n')
+    except:
+        pass
+
+# -------- config --------
+def _load_config():
+    global _config
+    try:
+        with open(_config_path(), 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            for k in _config:
+                if k in data:
+                    if isinstance(_config[k], dict) and isinstance(data[k], dict):
+                        _config[k].update(data[k])
+                    else:
+                        _config[k] = data[k]
+            if "per_doc_folders" not in _config or not isinstance(_config["per_doc_folders"], dict):
+                _config["per_doc_folders"] = {}
+            if "clicks_saved" not in _config or not isinstance(_config["clicks_saved"], int):
+                _config["clicks_saved"] = 0
+            if "quality" not in _config or _config["quality"] not in ("Legacy","Low","Medium","High","VeryHigh","Ultra"):
+                _config["quality"] = "Legacy"
+            for name in SLICER_CHOICES:
+                _config["slicer"]["paths"].setdefault(name, "")
+    except Exception:
+        pass
+
+def _save_config():
+    try:
+        with open(_config_path(), 'w', encoding='utf-8') as f:
+            json.dump(_config, f, indent=2)
+    except Exception:
+        pass
+
+# -------- document keying --------
+def _current_doc_key() -> str:
+    try:
+        app = adsk.core.Application.get()
+        doc = app.activeDocument if app else None
+        if doc:
+            try:
+                df = doc.dataFile
+                if df and getattr(df, 'id', None):
+                    return f'datafile:{df.id}'
+            except:
+                pass
+            nm = getattr(doc, 'name', None)
+            if nm:
+                return f'docname:{nm}'
+    except:
+        pass
+    return 'global'
+
+def _get_doc_folder() -> str:
+    key = _current_doc_key()
+    folder = _config.get("per_doc_folders", {}).get(key, '').strip()
+    if folder:
+        return folder
+    return (_config.get("export_dir") or '').strip()
+
+def _set_doc_folder(folder: str):
+    key = _current_doc_key()
+    _config.setdefault("per_doc_folders", {})[key] = folder
+    _config["export_dir"] = folder
+    _save_config()
+
+# -------- dialogs / naming --------
+def _pick_folder_dialog(title: str) -> str:
+    dlg = _ui.createFolderDialog()
+    dlg.title = title
+    return dlg.folder if dlg.showDialog() == adsk.core.DialogResults.DialogOK else ''
+
+def _pick_file_dialog(title: str, filter_: str = 'Executables (*.exe)') -> str:
+    dlg = _ui.createFileDialog()
+    dlg.title = title
+    dlg.filter = filter_
+    if dlg.showOpen() == adsk.core.DialogResults.DialogOK:
+        return dlg.filename
+    return ''
+
+def _safe_filename(name: str) -> str:
+    if not name: name = 'export'
+    illegal = '<>:"/\\|?*'
+    cleaned = ''.join(c for c in name if c not in illegal).rstrip(' .') or 'export'
+    if cleaned.upper() in ({'CON','PRN','AUX','NUL'} | {f'COM{i}' for i in range(1,10)} | {f'LPT{i}' for i in range(1,10)}):
+        cleaned = f'_{cleaned}'
+    return cleaned
+
+def _resolve_export_dir(maybe_override: str = '') -> str:
+    path = (maybe_override or _get_doc_folder() or '').strip()
+    if path:
+        return path
+    chosen = _pick_folder_dialog('Choose export folder for this document (remembered)')
+    if not chosen:
+        raise RuntimeError('Export cancelled (no folder chosen).')
+    _set_doc_folder(chosen)
+    return chosen
+
+# -------- export target & naming --------
+def _name_for_entity(entity) -> str:
+    try:
+        if isinstance(entity, adsk.fusion.BRepBody):
+            base = entity.name or 'export'
+        elif isinstance(entity, adsk.fusion.Occurrence):
+            base = entity.component.name or 'export'
+        elif isinstance(entity, adsk.fusion.Component):
+            base = entity.name or 'export'
+        else:
+            base = getattr(entity, 'name', None) or 'export'
+    except:
+        base = 'export'
+    base = re.sub(r':\d+$', '', base)
+    return base
+
+def _target_entity_and_name(design: adsk.fusion.Design, ui: adsk.core.UserInterface):
+    if _config.get("prefer_selection", True):
+        sels = ui.activeSelections
+        if sels and sels.count > 0:
+            ent = sels.item(0).entity
+            if isinstance(ent, (adsk.fusion.BRepBody, adsk.fusion.Component, adsk.fusion.Occurrence)):
+                return ent, _name_for_entity(ent)
+    comp = design.activeComponent
+    return comp, _name_for_entity(comp)
+
+# -------- STL analysis --------
+def _analyze_stl(stl_path: str):
+    info = {"isBinary": None, "triangles": None, "vertices": None, "fileSizeBytes": None}
+    try:
+        size = os.path.getsize(stl_path)
+        info["fileSizeBytes"] = size
+        with open(stl_path, 'rb') as f:
+            data = f.read()
+        if len(data) >= 84:
+            tri = struct.unpack('<I', data[80:84])[0]
+            expected = 84 + 50 * tri
+            if expected == len(data) and tri > 0:
+                info["isBinary"] = True
+                info["triangles"] = tri
+                info["vertices"] = tri * 3
+                return info
+        # ASCII fallback
+        try:
+            txt = data.decode('utf-8', errors='ignore')
+            tri = txt.count('\nfacet ') + txt.count('\rfacet ')
+            if tri == 0:
+                tri = txt.count('facet ')
+            info["isBinary"] = False
+            info["triangles"] = tri if tri > 0 else None
+            info["vertices"] = tri * 3 if tri > 0 else None
+        except Exception:
+            pass
+    except Exception as e:
+        _log(f'STL analyze failed: {e}')
+    return info
+
+# -------- OBJ quality presets (we avoid MeshRefinement enum for compatibility) --------
+# Units for tolerances below follow Fusion's OBJ API (typically centimeters for distances, radians for normal deviation).
+_QUALITY_PRESETS = {
+    'Low':       {'surfaceDeviation_cm': 0.25,   'normalDeviation_deg': 30.0, 'maximumEdgeLength_cm': 0.0,  'aspectRatio': 0.95},
+    'Medium':    {'surfaceDeviation_cm': 0.05,   'normalDeviation_deg': 20.0, 'maximumEdgeLength_cm': 0.0,  'aspectRatio': 0.85},
+    'High':      {'surfaceDeviation_cm': 0.01,   'normalDeviation_deg': 10.0, 'maximumEdgeLength_cm': 0.0,  'aspectRatio': 0.65},
+    'VeryHigh':  {'surfaceDeviation_cm': 0.0025, 'normalDeviation_deg': 5.0,  'maximumEdgeLength_cm': 0.0,  'aspectRatio': 0.25},
+    'Ultra':     {'surfaceDeviation_cm': 0.001,  'normalDeviation_deg': 3.0,  'maximumEdgeLength_cm': 0.0,  'aspectRatio': 0.20},
+}
+
+def _deg_to_rad(d): return float(d) * math.pi / 180.0
+
+def _apply_obj_quality(opts, quality: str) -> dict:
+    """Only sets numeric properties; lets Fusion mark refinement as custom internally."""
+    p = _QUALITY_PRESETS.get(quality, _QUALITY_PRESETS['High'])
+    applied = {
+        "mode": quality,
+        "target": "OBJ→STL",
+        "custom": {
+            "surfaceDeviation_cm": p['surfaceDeviation_cm'],
+            "normalDeviation_deg": p['normalDeviation_deg'],
+            "maximumEdgeLength_cm": p['maximumEdgeLength_cm'],
+            "aspectRatio": p['aspectRatio'],
+            "scale_mm": 10.0  # OBJ default centimeters -> mm
+        }
+    }
+    try:
+        # Setting these automatically implies "Custom" in Fusion's mesh refiner
+        opts.surfaceDeviation = float(p['surfaceDeviation_cm'])              # cm
+    except Exception as e:
+        _log(f'_apply_obj_quality surfaceDeviation set failed: {e}')
+    try:
+        opts.normalDeviation = float(_deg_to_rad(p['normalDeviation_deg']))  # radians
+    except Exception as e:
+        _log(f'_apply_obj_quality normalDeviation set failed: {e}')
+    try:
+        opts.maximumEdgeLength = float(p['maximumEdgeLength_cm'])            # cm (0 = no cap)
+    except Exception as e:
+        _log(f'_apply_obj_quality maximumEdgeLength set failed: {e}')
+    try:
+        opts.aspectRatio = float(p['aspectRatio'])                           # dimensionless
+    except Exception as e:
+        _log(f'_apply_obj_quality aspectRatio set failed: {e}')
+    return applied
+
+# -------- Binary STL writer (from parsed OBJ) --------
+def _write_binary_stl(stl_path: str, triangles):
+    """
+    triangles: iterable of (nx,ny,nz, (x1,y1,z1), (x2,y2,z2), (x3,y3,z3)) in millimeters.
+    """
+    tri_list = list(triangles)
+    tri_count = len(tri_list)
+
+    with open(stl_path, 'wb') as f:
+        # EXACT 80-byte header
+        header = f'QuickSTL v{ADDIN_VERSION} OBJ->STL'.encode('ascii', errors='ignore')
+        if len(header) > 80:
+            header = header[:80]
+        else:
+            header = header + b' ' * (80 - len(header))
+        f.write(header)
+
+        # 4-byte little-endian triangle count
+        f.write(struct.pack('<I', tri_count))
+
+        # Per-triangle records
+        for (nx, ny, nz, v1, v2, v3) in tri_list:
+            f.write(struct.pack('<3f', float(nx), float(ny), float(nz)))
+            f.write(struct.pack('<3f', float(v1[0]), float(v1[1]), float(v1[2])))
+            f.write(struct.pack('<3f', float(v2[0]), float(v2[1]), float(v2[2])))
+            f.write(struct.pack('<3f', float(v3[0]), float(v3[1]), float(v3[2])))
+            f.write(struct.pack('<H', 0))  # attribute byte count = 0
+
+def _triangulate_face(indices):
+    """Fan triangulation for polygon faces: returns triples of vertex indices (0-based)."""
+    tris = []
+    if len(indices) < 3:
+        return tris
+    for i in range(1, len(indices) - 1):
+        tris.append((indices[0], indices[i], indices[i + 1]))
+    return tris
+
+def _compute_normal(a, b, c):
+    ax, ay, az = a; bx, by, bz = b; cx, cy, cz = c
+    ux, uy, uz = (bx - ax, by - ay, bz - az)
+    vx, vy, vz = (cx - ax, cy - ay, cz - az)
+    # cross = u x v
+    nx = uy * vz - uz * vy
+    ny = uz * vx - ux * vz
+    nz = ux * vy - uy * vx
+    length = math.sqrt(nx*nx + ny*ny + nz*nz)
+    if length <= 1e-20:
+        return (0.0, 0.0, 0.0)
+    return (nx/length, ny/length, nz/length)
+
+def _export_via_obj_then_stl(design, entity, stl_fullpath: str, quality: str) -> dict:
+    """Use Fusion's OBJ exporter with quality controls, then convert OBJ→Binary STL."""
+    mgr = design.exportManager
+    # temp OBJ file
+    tmp_dir = tempfile.gettempdir()
+    tmp_obj = os.path.join(tmp_dir, f'quickstl_{int(time.time()*1000)}.obj')
+
+    opts = mgr.createOBJExportOptions(entity, tmp_obj)
+    # Be explicit: write to file, don't launch utilities
+    try: opts.sendToPrintUtility = False
+    except: pass
+    # Apply quality (numeric fields only)
+    applied = _apply_obj_quality(opts, quality)
+    mgr.execute(opts)
+
+    # Parse OBJ
+    vertices = []   # in OBJ units (likely cm)
+    faces = []      # list of vertex-index lists (0-based)
+
+    with open(tmp_obj, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            # vertex
+            if line.startswith('v '):
+                parts = line.split()
+                if len(parts) >= 4:
+                    try:
+                        x = float(parts[1]); y = float(parts[2]); z = float(parts[3])
+                        vertices.append((x, y, z))
+                    except:
+                        pass
+            # face
+            elif line.startswith('f '):
+                parts = line.split()[1:]
+                idxs = []
+                for p in parts:
+                    # f tokens can be "v", "v/vt", "v//vn", or "v/vt/vn"
+                    try:
+                        v_idx = p.split('/')[0]
+                        i = int(v_idx)
+                        if i > 0:
+                            i0 = i - 1  # OBJ is 1-based
+                        else:
+                            i0 = len(vertices) + i  # negative indices are relative to end
+                        idxs.append(i0)
+                    except:
+                        pass
+                if len(idxs) >= 3:
+                    faces.append(idxs)
+
+    # Convert OBJ units (cm) -> STL units (mm)
+    scale = 10.0  # 1 cm = 10 mm
+    v_mm = [(vx*scale, vy*scale, vz*scale) for (vx,vy,vz) in vertices]
+
+    # Build triangle stream
+    triangles = []
+    for face in faces:
+        for (i1, i2, i3) in _triangulate_face(face):
+            try:
+                a = v_mm[i1]; b = v_mm[i2]; c = v_mm[i3]
+            except Exception:
+                continue
+            nx, ny, nz = _compute_normal(a, b, c)
+            triangles.append((nx, ny, nz, a, b, c))
+
+    # Write Binary STL
+    _write_binary_stl(stl_fullpath, triangles)
+
+    # Cleanup
+    try:
+        os.remove(tmp_obj)
+    except:
+        pass
+
+    applied['custom']['triangles_written'] = len(triangles)
+    return applied
+
+def _export_via_stl_legacy(design, entity, stl_fullpath: str) -> dict:
+    """Legacy STL path: uses Fusion STL exporter (quality fixed in many builds)."""
+    mgr = design.exportManager
+    opts = mgr.createSTLExportOptions(entity, stl_fullpath)
+    opts.isBinaryFormat = True
+    try:
+        opts.sendToPrintUtility = False
+    except:
+        pass
+    mgr.execute(opts)
+    return {"mode": "Legacy", "target": "STL Only", "custom": {}}
+
+# -------- slicer helpers (Windows only) --------
+def _candidate_paths_for(name: str):
+    pf   = os.environ.get('ProgramFiles', r'C:\Program Files')
+    pf86 = os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')
+    lad  = os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData' / 'Local'))
+    C = {
+        'OrcaSlicer': [
+            rf'{pf}\OrcaSlicer\OrcaSlicer.exe',
+            rf'{lad}\Programs\OrcaSlicer\OrcaSlicer.exe'
+        ],
+        'SuperSlicer': [
+            rf'{pf}\SuperSlicer\SuperSlicer.exe',
+            rf'{pf86}\SuperSlicer\SuperSlicer.exe'
+        ],
+        'Bambu Studio': [
+            rf'{pf}\Bambu Studio\Bambu Studio.exe',
+            rf'{pf}\BambuStudio\BambuStudio.exe',
+            rf'{lad}\Programs\BambuStudio\BambuStudio.exe'
+        ],
+    }
+    return C.get(name, [])
+
+def _autodetect_slicer_path(name: str) -> str:
+    saved = (_config.get('slicer', {}).get('paths', {}) or {}).get(name, '')
+    if saved and os.path.isfile(saved):
+        return saved
+    for p in _candidate_paths_for(name):
+        if p and os.path.isfile(p):
+            return p
+    return saved or ''
+
+def _launch_slicer(exe: str, stl_path: str) -> None:
+    if not os.path.isfile(exe):
+        raise RuntimeError(f'Slicer executable not found:\n{exe}')
+    if not os.path.isfile(stl_path):
+        raise RuntimeError(f'STL not found:\n{stl_path}')
+    proc = subprocess.Popen([exe, stl_path], creationflags=0x00000008)  # CREATE_NEW_CONSOLE
+    try:
+        import ctypes, ctypes.wintypes as wt
+        user32 = ctypes.windll.user32
+        HWND = wt.HWND; LRESULT = wt.LPARAM
+        EnumWindowsProc = ctypes.WINFUNCTYPE(wt.BOOL, HWND, LRESULT)
+        handles = []
+        def enum_cb(hwnd, lParam):
+            if user32.IsWindowVisible(hwnd) and user32.IsIconic(hwnd) == 0:
+                _pid = wt.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(_pid))
+                if _pid.value == proc.pid:
+                    handles.append(hwnd)
+            return True
+        deadline = time.time() + 6.0
+        while time.time() < deadline and not handles:
+            user32.EnumWindows(EnumWindowsProc(enum_cb), 0)
+            if handles: break
+            time.sleep(0.2)
+        if handles:
+            SW_RESTORE = 9
+            user32.ShowWindow(handles[0], SW_RESTORE)
+            user32.SetForegroundWindow(handles[0])
+    except Exception as e:
+        _log(f'Focus slicer error: {e}')
+
+# -------- toast plumbing --------
+def _screen_size():
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        try: user32.SetProcessDPIAware()
+        except Exception: pass
+        return int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1))
+    except Exception:
+        return 1920, 1080
+
+def _open_path(path: str):
+    if not path: return
+    try:
+        os.startfile(path)  # type: ignore[attr-defined]
+    except Exception as e:
+        _log(f'Open path failed: {e}')
+
+class _ToastActionHandler(adsk.core.HTMLEventHandler):
+    def notify(self, args: adsk.core.HTMLEventArgs):
+        try:
+            action = args.action or ''
+            data = (args.data or '').strip().strip('"').strip("'")
+            if action == 'openFolder':
+                _open_path(data)
+            elif action in ('closeToast', 'autoClose'):
+                pal = _ui.palettes.itemById(TOAST_ID)
+                if pal:
+                    pal.isVisible = False
+                    pal.deleteMe()
+            elif action == 'previewError':
+                _log(f'Preview error: {data}')
+        except Exception as e:
+            _log(f'HTML event handler error: {e}')
+
+def _write_toast_json(fname: str, folder: str, overwrote: bool, fullpath: str):
+    payload = {
+        "version": ADDIN_VERSION,
+        "title": TOAST_TITLE,
+        "name": fname,
+        "folder": folder,
+        "fileUrl": Path(fullpath).resolve().as_uri(),
+        "overwrote": bool(overwrote),
+        "toastMs": TOAST_MS,
+        "width": TOAST_W,
+        "height": TOAST_H
+    }
+    os.makedirs(_res_path(), exist_ok=True)
+    with open(_toast_json_path(), 'w', encoding='utf-8') as f:
+        json.dump(payload, f, ensure_ascii=False)
+
+def _show_toast(folder: str, fname: str, overwrote: bool, fullpath: str):
+    html_path = _toast_html_path()
+    if not os.path.isfile(html_path):
+        _ui.messageBox(
+            'Quick STL toast HTML missing.\n\nExpected:\n' + html_path +
+            '\n\nPlace quickstl_toast.html there (and three.min.js in resources/preview).',
+            f'{ADDIN_NAME} v{ADDIN_VERSION}'
+        ); _log('Missing toast HTML at: ' + html_path); return
+
+    _write_toast_json(fname, folder, overwrote, fullpath)
+    if not os.path.isfile(_toast_json_path()):
+        _ui.messageBox('Toast payload JSON not found — export succeeded but UI payload was not written.',
+                       f'{ADDIN_NAME} v{ADDIN_VERSION}')
+        _log('Missing toast JSON at: ' + _toast_json_path()); return
+
+    pal = _ui.palettes.itemById(TOAST_ID)
+    if pal:
+        try: pal.deleteMe()
+        except: pass
+
+    html_url = Path(html_path).resolve().as_uri()
+    pal = _ui.palettes.add(
+        TOAST_ID, f'{TOAST_TITLE} — Quick STL v{ADDIN_VERSION}', html_url,
+        True, False, False, TOAST_W, TOAST_H, True
+    )
+    try:
+        pal.dockingState = adsk.core.PaletteDockingStates.PaletteDockStateFloating
+        pal.isAlwaysOnTop = True
+        sw, sh = _screen_size()
+        x = max(0, int(sw * (1.0/3.0) - TOAST_W / 2.0))
+        y = max(0, int(sh * 0.5       - TOAST_H / 2.0))
+        pal.setPosition(x, y)
+    except:
+        pass
+
+    onHtml = _ToastActionHandler()
+    pal.incomingFromHTML.add(onHtml)
+    _handlers.append(onHtml)
+
+# -------- clicks saved --------
+def _add_clicks_saved(n: int, inputs: adsk.core.CommandInputs = None):
+    try:
+        _config['clicks_saved'] = int(_config.get('clicks_saved', 0)) + int(n)
+    except:
+        _config['clicks_saved'] = int(n)
+    _save_config()
+    if inputs:
+        tb = adsk.core.TextBoxCommandInput.cast(_find_input(inputs, 'clicksSavedText'))
+        if tb:
+            tb.text = f'Clicks saved: {_config.get("clicks_saved", 0)}'
+
+# -------- diagnostics --------
+def _write_diag_file(context: dict, open_after: bool = False):
+    try:
+        with open(_diag_path(), 'w', encoding='utf-8') as f:
+            json.dump(context, f, indent=2)
+        if open_after:
+            try:
+                os.startfile(_diag_path())
+            except Exception as e:
+                _log(f'Open diag file failed: {e}')
+    except Exception as e:
+        _log(f'Write diag failed: {e}')
+
+def _snapshot_common(action: str, engine: str, quality_applied: dict, target_name: str, fullpath: str, stl_info: dict) -> dict:
+    return {
+        "version": ADDIN_VERSION,
+        "timestamp": datetime.datetime.now().isoformat(),
+        "action": action,                           # "export" | "send"
+        "engine": engine,                           # "STL Only" | "OBJ→STL"
+        "quality": _config.get("quality","Legacy"),
+        "quality_applied": quality_applied,         # details of applied settings
+        "prefer_selection": bool(_config.get("prefer_selection", True)),
+        "doc_key": _current_doc_key(),
+        "export_folder": os.path.dirname(fullpath) if fullpath else _get_doc_folder(),
+        "file_name": os.path.basename(fullpath) if fullpath else "",
+        "file_path": fullpath,
+        "file_size_bytes": (stl_info or {}).get("fileSizeBytes"),
+        "stl_is_binary": (stl_info or {}).get("isBinary"),
+        "stl_triangles": (stl_info or {}).get("triangles"),
+        "stl_vertices": (stl_info or {}).get("vertices"),
+        "entity_name": target_name
+    }
+
+# -------- export wrappers --------
+def _do_export_to_path(folder_override: str = '', skip_toast: bool = False, inputs: adsk.core.CommandInputs = None) -> str:
+    global _busy
+    if _busy:
+        return ''
+    _busy = True
+    try:
+        app = adsk.core.Application.get(); ui = app.userInterface
+        design = adsk.fusion.Design.cast(app.activeProduct)
+        if not design: raise RuntimeError('No active design.')
+
+        export_dir = _resolve_export_dir(folder_override)
+        if not os.path.isdir(export_dir):
+            os.makedirs(export_dir, exist_ok=True)
+
+        target, raw_name = _target_entity_and_name(design, ui)
+        fname = _safe_filename(raw_name) + '.stl'
+        full  = os.path.join(export_dir, fname)
+        overwriting = os.path.exists(full)
+
+        quality = _config.get("quality", "Legacy")
+        if quality == 'Legacy':
+            applied = _export_via_stl_legacy(design, target, full)
+            engine = "STL Only"
+        else:
+            applied = _export_via_obj_then_stl(design, target, full, quality)
+            engine = "OBJ→STL"
+
+        if not os.path.exists(full):
+            raise RuntimeError('Export failed (no file created):\n' + full)
+
+        if not skip_toast:
+            try:
+                _show_toast(export_dir, fname, overwriting, full)
+            except Exception as e:
+                ui.messageBox(
+                    f'✅ STL export successful. (Quick STL v{ADDIN_VERSION})\n\n'
+                    f'Name: {fname}\n'
+                    f'Folder:\n{export_dir}\n'
+                    f'Overwrote existing file: {"Yes" if overwriting else "No"}\n\n'
+                    f'(Palette fallback due to: {e})',
+                    f'{ADDIN_NAME} v{ADDIN_VERSION}'
+                )
+
+        stl_info = _analyze_stl(full)
+        snap = _snapshot_common("export", engine, applied, raw_name, full, stl_info)
+        _write_diag_file(snap, open_after=False)
+
+        if inputs:
+            _add_clicks_saved(5, inputs)
+        return full
+    finally:
+        _busy = False
+
+def _export_and_send(folder_override: str = '', inputs: adsk.core.CommandInputs = None) -> bool:
+    app = adsk.core.Application.get(); ui = app.userInterface
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    if not design:
+        ui.messageBox('No active design.', f'{ADDIN_NAME} v{ADDIN_VERSION}')
+        return False
+
+    path = _do_export_to_path(folder_override=folder_override, skip_toast=True, inputs=None)
+    if not path:
+        return False
+
+    sconf = _config.get('slicer', {})
+    name  = sconf.get('name') or 'OrcaSlicer'
+    exe   = (sconf.get('paths') or {}).get(name, '')
+    if not exe:
+        exe = _autodetect_slicer_path(name)
+        if exe:
+            _config['slicer']['paths'][name] = exe
+            _save_config()
+
+    _launch_slicer(exe, path)
+
+    stl_info = _analyze_stl(path)
+    applied = {"mode": _config.get("quality","Legacy"),
+               "target": ("STL Only" if _config.get("quality","Legacy")=="Legacy" else "OBJ→STL"),
+               "custom": {}}
+    snap = _snapshot_common("send",
+                            "STL Only" if _config.get("quality","Legacy")=="Legacy" else "OBJ→STL",
+                            applied, os.path.splitext(os.path.basename(path))[0], path, stl_info)
+    _write_diag_file(snap, open_after=False)
+
+    if inputs:
+        _add_clicks_saved(5, inputs)
+    return True
+
+# -------- helper: robust lookup for grouped inputs --------
+def _find_input(inputs: adsk.core.CommandInputs, input_id: str):
+    if not inputs or not input_id:
+        return None
+    try:
+        found = inputs.itemById(input_id)
+        if found:
+            return found
+    except:
+        pass
+    stack = [inputs]
+    try:
+        while stack:
+            coll = stack.pop()
+            for i in range(coll.count):
+                item = coll.item(i)
+                try:
+                    if getattr(item, 'id', '') == input_id:
+                        return item
+                except:
+                    pass
+                if isinstance(item, adsk.core.GroupCommandInput):
+                    stack.append(item.children)
+    except:
+        pass
+    return None
+
+# -------- command --------
+class _CmdCreated(adsk.core.CommandCreatedEventHandler):
+    def notify(self, args: adsk.core.CommandCreatedEventArgs):
+        cmd = args.command; inputs = cmd.commandInputs
+        try: cmd.okButtonText = 'OK'
+        except: pass
+
+        # --- Group 1: Export Destination ---
+        g1 = inputs.addGroupCommandInput('grpExport', 'Export Destination')
+        g1.isExpanded = True; g1.isBordered = True
+        g1c = g1.children
+
+        current_folder = _get_doc_folder()
+        folder_disp = g1c.addStringValueInput('folderDisp', 'Export Folder', current_folder)
+        folder_disp.isReadOnly = True
+        browse   = g1c.addBoolValueInput('browseBtn', 'Browse…', False, '', False)
+        openfld  = g1c.addBoolValueInput('openFolderBtn', 'Open Folder', False, '', False)
+        prefer   = g1c.addBoolValueInput('preferSel', 'Prefer selection when available', True, '', _config.get('prefer_selection', True))
+        note     = g1c.addTextBoxCommandInput('perDocNote', '', 'This folder is remembered for this document.', 1, True)
+        try: note.isFullWidth = True
+        except: pass
+
+        # Mesh Quality
+        q = _config.get('quality', 'Legacy')
+        qdd = g1c.addDropDownCommandInput('qualityDD', 'Mesh Quality', adsk.core.DropDownStyles.TextListDropDownStyle)
+        for name in ['Legacy','Low','Medium','High','VeryHigh','Ultra']:
+            qdd.listItems.add(name, name == q, '')
+
+        # --- Group 2: Slicer ---
+        g2 = inputs.addGroupCommandInput('grpSlicer', 'Slicer')
+        g2.isExpanded = True; g2.isBordered = True
+        g2c = g2.children
+        drop = g2c.addDropDownCommandInput('slicerChoice', 'Slicer', adsk.core.DropDownStyles.TextListDropDownStyle)
+        for s in SLICER_CHOICES:
+            drop.listItems.add(s, (s == _config.get('slicer', {}).get('name', 'OrcaSlicer')), '')
+        slicer_path = _autodetect_slicer_path(_config.get('slicer', {}).get('name', 'OrcaSlicer'))
+        if slicer_path:
+            _config['slicer']['paths'][_config['slicer']['name']] = slicer_path
+            _save_config()
+        path_disp = g2c.addStringValueInput('slicerPath', 'Slicer EXE', slicer_path)
+        path_disp.isReadOnly = True
+        browse_slicer = g2c.addBoolValueInput('browseSlicer', 'Browse Slicer…', False, '', False)
+
+        # --- Group 3: Actions ---
+        g3 = inputs.addGroupCommandInput('grpActions', 'Actions')
+        g3.isExpanded = True; g3.isBordered = True
+        g3c = g3.children
+        send_btn   = g3c.addBoolValueInput('sendBtn', 'Send to slicer', False, '', False)
+        export_btn = g3c.addBoolValueInput('exportBtn', 'Export STL',    False, '', False)
+        clicks_tb  = g3c.addTextBoxCommandInput('clicksSavedText', '', f'Clicks saved: {_config.get("clicks_saved", 0)}', 1, True)
+        try: clicks_tb.isFullWidth = True
+        except: pass
+        diag_btn   = g3c.addBoolValueInput('diagBtn', 'Diagnostics', False, '', False)
+
+        # Tooltips
+        try:
+            folder_disp.tooltip = 'This folder is saved for THIS document. Use “Browse…” to change.'
+            browse.tooltip      = 'Pick a new export folder. It is remembered for this document.'
+            openfld.tooltip     = 'Open the current export folder in File Explorer.'
+            prefer.tooltip      = 'ON: if a body is selected, export that body; otherwise export the active component.'
+            qdd.tooltip         = ('Mesh tessellation quality:\n'
+                                   '• Legacy: STL Only (same as Fusion 3D Print)\n'
+                                   '• Low/…/Ultra: OBJ→STL with tighter tolerances')
+            drop.tooltip        = 'Slicer to launch when you click "Send to slicer".'
+            path_disp.tooltip   = 'Executable used to launch the slicer.'
+            browse_slicer.tooltip = 'Pick the slicer executable (.exe).'
+            export_btn.tooltip  = 'Export STL and show a success toast with live preview.'
+            send_btn.tooltip    = 'Export STL, then launch and focus the slicer. No toast unless it fails.'
+            clicks_tb.tooltip   = 'Estimated clicks saved (assumes 5 per export or send).'
+            diag_btn.tooltip    = 'Open quickstl_diag.json (last export/send details).'
+            cmd.tooltip         = f'Quick STL v{ADDIN_VERSION} — OBJ→STL quality + diagnostics.'
+        except:
+            pass
+
+        onChanged = _CmdInputChanged(); cmd.inputChanged.add(onChanged); _handlers.append(onChanged)
+        onExec    = _CmdExecute();      cmd.execute.add(onExec);        _handlers.append(onExec)
+
+class _CmdInputChanged(adsk.core.InputChangedEventHandler):
+    def notify(self, args: adsk.core.InputChangedEventArgs):
+        try:
+            ip = args.input
+            inputs = args.inputs
+
+            if ip.id == 'browseBtn':
+                chosen = _pick_folder_dialog('Choose export folder (saved for this document)')
+                if chosen:
+                    fld = adsk.core.StringValueCommandInput.cast(_find_input(inputs, 'folderDisp'))
+                    if fld: fld.value = chosen
+                    _set_doc_folder(chosen)
+                b = adsk.core.BoolValueCommandInput.cast(ip)
+                if b: b.value = False
+
+            elif ip.id == 'openFolderBtn':
+                fld = adsk.core.StringValueCommandInput.cast(_find_input(inputs, 'folderDisp'))
+                folder = (fld.value.strip() if (fld and fld.value) else _get_doc_folder())
+                if not folder:
+                    _ui.messageBox('No export folder set yet.\n\nUse “Browse…” to choose one.', f'{ADDIN_NAME} v{ADDIN_VERSION}')
+                elif not os.path.isdir(folder):
+                    _ui.messageBox('Export folder does not exist:\n' + folder + '\n\nUse “Browse…” to choose a current folder.', f'{ADDIN_NAME} v{ADDIN_VERSION}')
+                else:
+                    _open_path(folder)
+                b = adsk.core.BoolValueCommandInput.cast(ip)
+                if b: b.value = False
+
+            elif ip.id == 'qualityDD':
+                dd = adsk.core.DropDownCommandInput.cast(ip)
+                if dd and dd.selectedItem:
+                    _config['quality'] = dd.selectedItem.name
+                    _save_config()
+
+            elif ip.id == 'slicerChoice':
+                dd = adsk.core.DropDownCommandInput.cast(ip)
+                if dd and dd.selectedItem:
+                    name = dd.selectedItem.name
+                    _config['slicer']['name'] = name
+                    p = _autodetect_slicer_path(name)
+                    sp = adsk.core.StringValueCommandInput.cast(_find_input(inputs, 'slicerPath'))
+                    if sp: sp.value = p
+                    _config['slicer']['paths'][name] = p
+                    _save_config()
+
+            elif ip.id == 'browseSlicer':
+                dd  = adsk.core.DropDownCommandInput.cast(_find_input(inputs, 'slicerChoice'))
+                cur = dd.selectedItem.name if dd and dd.selectedItem else _config['slicer']['name']
+                chosen = _pick_file_dialog(f'Locate {cur} executable')
+                if chosen:
+                    sp = adsk.core.StringValueCommandInput.cast(_find_input(inputs, 'slicerPath'))
+                    if sp: sp.value = chosen
+                    _config['slicer']['paths'][cur] = chosen
+                    _save_config()
+                b = adsk.core.BoolValueCommandInput.cast(ip)
+                if b: b.value = False
+
+            elif ip.id == 'exportBtn':
+                b = adsk.core.BoolValueCommandInput.cast(ip)
+                if not b or not b.value: return
+                b.value = False
+                try:
+                    fld = adsk.core.StringValueCommandInput.cast(_find_input(inputs, 'folderDisp'))
+                    folder = (fld.value.strip() if fld else '')
+                    if not folder:
+                        folder = _resolve_export_dir('')
+                        if fld: fld.value = folder
+                    _set_doc_folder(folder)
+                    _do_export_to_path(folder_override=folder, skip_toast=False, inputs=inputs)
+                except Exception as e:
+                    _log(f'Export STL failed: {e}')
+                    _ui.messageBox(f'❌ Export failed.\n\n{e}\n\n{traceback.format_exc()}', f'{ADDIN_NAME} v{ADDIN_VERSION}')
+
+            elif ip.id == 'sendBtn':
+                b = adsk.core.BoolValueCommandInput.cast(ip)
+                if not b or not b.value: return
+                b.value = False
+                try:
+                    fld = adsk.core.StringValueCommandInput.cast(_find_input(inputs, 'folderDisp'))
+                    folder = (fld.value.strip() if fld else '')
+                    if not folder:
+                        folder = _resolve_export_dir('')
+                        if fld: fld.value = folder
+                    _set_doc_folder(folder)
+                    _export_and_send(folder_override=folder, inputs=inputs)
+                except Exception as e:
+                    _log(f'Send to slicer failed: {e}')
+                    _ui.messageBox(f'❌ Send to slicer failed.\n\n{e}\n\n{traceback.format_exc()}', f'{ADDIN_NAME} v{ADDIN_VERSION}')
+
+            elif ip.id == 'diagBtn':
+                # NEW: open-only behavior (no snapshot creation)
+                try:
+                    path = _diag_path()
+                    if os.path.isfile(path):
+                        os.startfile(path)
+                    else:
+                        _ui.messageBox('No diagnostics file found yet.\n\nExport once to generate quickstl_diag.json.',
+                                       f'{ADDIN_NAME} v{ADDIN_VERSION}')
+                except Exception as e:
+                    _log(f'Diagnostics open failed: {e}')
+                b = adsk.core.BoolValueCommandInput.cast(ip)
+                if b: b.value = False
+
+        except Exception as e:
+            _log(f'InputChanged error: {e}')
+
+class _CmdExecute(adsk.core.CommandEventHandler):
+    def notify(self, args: adsk.core.CommandEventArgs):
+        try:
+            inputs = args.command.commandInputs
+            pref = adsk.core.BoolValueCommandInput.cast(_find_input(inputs, 'preferSel'))
+            _config['prefer_selection'] = bool(pref.value) if pref else True
+            _save_config()
+        except Exception as e:
+            _log(f'Execute (OK) error: {e}')
+
+# -------- UI wiring --------
+def _ensure_removed(ui: adsk.core.UserInterface, cid: str):
+    try:
+        ws = ui.workspaces.itemById('FusionSolidEnvironment')
+        if ws:
+            for i in range(ws.toolbarPanels.count):
+                p = ws.toolbarPanels.item(i)
+                c = p.controls.itemById(cid)
+                if c: c.deleteMe()
+        cmd = ui.commandDefinitions.itemById(cid)
+        if cmd: cmd.deleteMe()
+    except:
+        pass
+
+def _ensure_command(defs: adsk.core.CommandDefinitions, cid: str, name: str, desc: str):
+    cmd = defs.itemById(cid)
+    if cmd:
+        try: cmd.tooltip = f'{desc} (v{ADDIN_VERSION})'
+        except: pass
+        return cmd
+    res = _icon_folder()
+    if os.path.isdir(res):
+        c = defs.addButtonDefinition(cid, name, f'{desc} (v{ADDIN_VERSION})', res)
+    else:
+        c = defs.addButtonDefinition(cid, name, f'{desc} (v{ADDIN_VERSION})')
+    return c
+
+def _promote_in_panel(panel: adsk.core.ToolbarPanel, cmd_def: adsk.core.CommandDefinition):
+    ctrl = panel.controls.itemById(CMD_ID)
+    if not ctrl:
+        ctrl = panel.controls.addCommand(cmd_def)
+    try:
+        ctrl.isPromoted = True
+        ctrl.isPromotedByDefault = True
+    except:
+        pass
+
+def _promote_button_everywhere(ui: adsk.core.UserInterface):
+    ws = ui.workspaces.itemById('FusionSolidEnvironment')
+    if not ws: return
+    panels = ws.toolbarPanels
+    cmd_def = ui.commandDefinitions.itemById(CMD_ID)
+    for pid in ['SolidScriptsAddinsPanel', 'ToolsAddinsPanel', 'SolidUtilitiesPanel']:
+        try:
+            p = panels.itemById(pid)
+            if p: _promote_in_panel(p, cmd_def)
+        except:
+            pass
+
+def run(context):
+    global _app, _ui
+    try:
+        _app = adsk.core.Application.get()
+        _ui  = _app.userInterface
+        _load_config()
+        for oid in ['quickstl_export_choose_cmd', 'quickSTL.export.choose.cmd', 'quickSTL.export.cmd']:
+            _ensure_removed(_ui, oid)
+        defs = _ui.commandDefinitions
+        c = _ensure_command(defs, CMD_ID, CMD_NAME, 'Export selected body (or active component) to STL.')
+        onCreated = _CmdCreated(); c.commandCreated.add(onCreated); _handlers.append(onCreated)
+        _promote_button_everywhere(_ui)
+    except:
+        if _ui:
+            _ui.messageBox(f'{ADDIN_NAME} v{ADDIN_VERSION}\n\nInit failed:\n\n{traceback.format_exc()}')
+
+def stop(context):
+    try:
+        ui = adsk.core.Application.get().userInterface
+        _ensure_removed(ui, CMD_ID)
+        pal = ui.palettes.itemById(TOAST_ID)
+        if pal:
+            try: pal.deleteMe()
+            except: pass
+    except:
+        pass

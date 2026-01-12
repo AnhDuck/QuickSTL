@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Quick STL</title>
+<style>
+  html,body { margin:0; padding:0; background:#222; color:#ddd; font:13px/1.4 -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+  .wrap { padding:14px 16px; }
+  .title { color:#8fda72; font-weight:600; margin-bottom:6px; font-size:14px; }
+  .row { opacity:.95; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; }
+  .dim { color:#aaa; }
+  .actions { margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  button { padding:4px 10px; border-radius:6px; background:#333; border:1px solid #444; color:#ddd; cursor:default; }
+  button:hover { background:#3a3a3a; }
+  .error { margin-top:8px; padding:6px 8px; border-radius:6px; background:#3a1f1f; border:1px solid #7a3b3b; color:#ffd1d1; display:none; }
+  #viewer { width:100%; height:340px; margin:6px 0 4px 0; background:#1b1b1b; border:1px solid #333; border-radius:6px; overflow:hidden; }
+  .src { font-size:11px; color:#888; }
+</style>
+<script>
+  // ---- Fusion bridge helpers ----
+  function send(action, payload){ if (window.adsk && window.adsk.fusionSendData) window.adsk.fusionSendData(action, payload||''); }
+  function report(phase, message, meta){
+    try{
+      var data = JSON.stringify(Object.assign({phase:phase, message:String(message||'')}, meta||{}));
+      send('previewError', data);
+      var e = document.getElementById('err'); if (e){ e.style.display='block'; e.textContent = 'Preview error: ' + message; }
+    }catch(_){}
+  }
+</script>
+<script src="preview/three.min.js" onerror="window.__THREE_FAIL__=true"></script>
+<script>
+  // ---- Minimal STL utilities ----
+  function readArrayBuffer(url, ok, fail){
+    try{
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', url, true);
+      xhr.responseType = 'arraybuffer';
+      xhr.onload = function(){ (xhr.status===200||xhr.status===0) ? ok(xhr.response) : fail('HTTP '+xhr.status); };
+      xhr.onerror = function(){ fail('XHR error'); };
+      xhr.send();
+    }catch(e){ fail(String(e)); }
+  }
+  function parseSTL(buf){
+    if (!buf || buf.byteLength < 84) return { error: 'File too small for STL' };
+    var dv = new DataView(buf);
+    var triCount = dv.getUint32(80, true);
+    var expected = 84 + triCount * 50;
+    var isBinary = (expected === buf.byteLength) && triCount > 0;
+
+    if (isBinary){
+      try{
+        var nTris = triCount|0;
+        var pos = new Float32Array(nTris * 9);
+        var nor = new Float32Array(nTris * 9);
+        var off = 84;
+        for (var i=0;i<nTris;i++){
+          var nx = dv.getFloat32(off+0, true), ny = dv.getFloat32(off+4, true), nz = dv.getFloat32(off+8, true);
+          var v0x = dv.getFloat32(off+12, true), v0y = dv.getFloat32(off+16, true), v0z = dv.getFloat32(off+20, true);
+          var v1x = dv.getFloat32(off+24, true), v1y = dv.getFloat32(off+28, true), v1z = dv.getFloat32(off+32, true);
+          var v2x = dv.getFloat32(off+36, true), v2y = dv.getFloat32(off+40, true), v2z = dv.getFloat32(off+44, true);
+          var p = i*9;
+          pos[p+0]=v0x; pos[p+1]=v0y; pos[p+2]=v0z;
+          pos[p+3]=v1x; pos[p+4]=v1y; pos[p+5]=v1z;
+          pos[p+6]=v2x; pos[p+7]=v2y; pos[p+8]=v2z;
+          for (var j=0;j<9;j+=3){ nor[p+j+0]=nx; nor[p+j+1]=ny; nor[p+j+2]=nz; }
+          off += 50;
+        }
+        return { positions: pos, normals: nor };
+      }catch(e){ return { error: 'Binary parse error: ' + e }; }
+    }
+    try{
+      var txt = new TextDecoder('utf-8').decode(new Uint8Array(buf));
+      if (txt.indexOf('facet') === -1 || txt.indexOf('vertex') === -1) return { error: 'Not STL (no facet/vertex tokens)' };
+      var posA = [], norA = [], nx=0, ny=0, nz=0;
+      var lines = txt.split(/\r?\n/);
+      for (var i=0;i<lines.length;i++){
+        var line = lines[i].trim();
+        if (line.startsWith('facet normal')){
+          var m = line.match(/facet\s+normal\s+([-+eE0-9\.]+)\s+([-+eE0-9\.]+)\s+([-+eE0-9\.]+)/);
+          if (m){ nx=parseFloat(m[1]); ny=parseFloat(m[2]); nz=parseFloat(m[3]); }
+        }else if (line.startsWith('vertex')){
+          var v = line.match(/vertex\s+([-+eE0-9\.]+)\s+([-+eE0-9\.]+)\s+([-+eE0-9\.]+)/);
+          if (v){ posA.push(parseFloat(v[1]),parseFloat(v[2]),parseFloat(v[3])); norA.push(nx,ny,nz); }
+        }
+      }
+      if (posA.length % 9 !== 0) return { error:'ASCII parse produced non-triangle count' };
+      return { positions: new Float32Array(posA), normals: new Float32Array(norA) };
+    }catch(e){ return { error: 'ASCII parse error: ' + e }; }
+  }
+
+  // ---- Viewer ----
+  function mountViewer(fileUrl){
+    if (window.__THREE_FAIL__){ report('lib-load','Failed to load three.min.js'); return; }
+    if (!window.THREE){ report('init','THREE not present'); return; }
+
+    var root = document.getElementById('viewer');
+    if (!root){ send('previewOK',''); return; }
+
+    var scene = new THREE.Scene(); scene.background = new THREE.Color(0x222222);
+    var camera = new THREE.PerspectiveCamera(45, 1.0, 0.01, 1000);
+    var renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
+    renderer.setPixelRatio(window.devicePixelRatio||1);
+    root.innerHTML=''; root.appendChild(renderer.domElement);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+    var key  = new THREE.DirectionalLight(0xffffff, 1.2); key.position.set( 2, 3, 1); scene.add(key);
+    var fill = new THREE.DirectionalLight(0xffffff, 0.5); fill.position.set(-1, 1,-2); scene.add(fill);
+    var rim  = new THREE.DirectionalLight(0xffffff, 0.6); rim.position.set(-2, 2, 2); scene.add(rim);
+
+    readArrayBuffer(fileUrl, function(buf){
+      var res = parseSTL(buf);
+      if (res.error){ report('parse', res.error); return; }
+      try{
+        var geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(res.positions, 3));
+        if (res.normals && res.normals.length === res.positions.length){
+          geo.setAttribute('normal', new THREE.BufferAttribute(res.normals, 3));
+        }else{
+          geo.computeVertexNormals();
+        }
+        var mat = new THREE.MeshStandardMaterial({ color:0xdddddd, metalness:0.0, roughness:0.6, flatShading:true });
+        var mesh = new THREE.Mesh(geo, mat);
+        scene.add(mesh);
+        try{
+          var edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 15), new THREE.LineBasicMaterial({ color: 0x111111 }));
+          scene.add(edges);
+        }catch(_){}
+
+        geo.computeBoundingSphere();
+        var bs = geo.boundingSphere || {center:new THREE.Vector3(), radius:50};
+        var center = bs.center, radius = Math.max(1e-6, bs.radius);
+
+        function resizeAndFit(){
+          var W = Math.max(1, root.clientWidth), H = Math.max(1, root.clientHeight);
+          renderer.setSize(W, H, false);
+          camera.aspect = W / H;
+
+          var halfV = (camera.fov * Math.PI / 180) / 2;
+          var halfH = Math.atan(Math.tan(halfV) * camera.aspect);
+          var distV = radius / Math.tan(halfV);
+          var distH = radius / Math.tan(halfH);
+          var distance = Math.max(distV, distH) * 1.12; // ~12% margin
+
+          var dir = new THREE.Vector3(1, 0.75, 1).normalize();
+          camera.position.copy(center).addScaledVector(dir, distance);
+          camera.lookAt(center);
+          camera.near = Math.max(0.01, distance / 200);
+          camera.far  = distance + radius * 40;
+          camera.updateProjectionMatrix();
+
+          renderer.render(scene, camera);
+        }
+
+        setTimeout(resizeAndFit, 0);
+        try{ new ResizeObserver(resizeAndFit).observe(root); }catch(_){ window.addEventListener('resize', resizeAndFit); }
+
+        send('previewOK','');
+      }catch(e){ report('render', String(e)); }
+    }, function(err){ report('stl-load', String(err), {url:fileUrl}); });
+  }
+
+  // ---- Boot (JSON-driven) ----
+  async function boot(){
+    try{
+      // Cache-bust the JSON so repeated exports refresh the data
+      const res = await fetch('quickstl_toast.json?ts=' + Date.now());
+      if (!res.ok) throw new Error('JSON HTTP ' + res.status);
+      const j = await res.json();
+
+      // Fill text
+      document.getElementById('title').textContent = `✅ ${j.title}. `;
+      document.getElementById('ver').textContent = 'Quick STL v' + (j.version||'?');
+      document.getElementById('name').textContent = j.name || '';
+      document.getElementById('folder').textContent = j.folder || '';
+      document.getElementById('overwrote').textContent = j.overwrote ? 'Yes' : 'No';
+
+      // Wire actions
+      document.getElementById('openFolder').addEventListener('click', function(e){ e.stopPropagation(); send('openFolder', j.folder||''); });
+
+      // Dismiss behaviors (always close even if preview fails)
+      var ms = (+j.toastMs||12000);
+      setTimeout(function(){ send('autoClose',''); }, ms);
+      document.body.addEventListener('click', function(){ send('closeToast',''); });
+      window.addEventListener('keydown', function(){ send('closeToast',''); });
+
+      // Mount preview last
+      if (j.fileUrl) mountViewer(j.fileUrl);
+    }catch(e){
+      report('boot', String(e));
+      // Still auto-close on any failure path
+      setTimeout(function(){ send('autoClose',''); }, 12000);
+    }
+  }
+
+  window.addEventListener('load', boot);
+</script>
+</head>
+<body>
+  <div class="wrap">
+    <div class="title" id="title">✅ STL export successful. <span class="dim" id="ver"></span></div>
+    <div class="row"><span class="dim">Name:</span> <span class="mono" id="name"></span></div>
+    <div class="row"><span class="dim">Folder:</span> <span class="mono" id="folder"></span></div>
+    <div class="row"><span class="dim">Overwrote:</span> <span class="mono" id="overwrote"></span></div>
+    <div id="viewer"></div>
+    <div class="actions">
+      <button id="openFolder" title="Open the export folder in your file manager">Open Folder</button>
+      <span class="src">preview source: local (three.js)</span>
+    </div>
+    <div id="err" class="error"></div>
+  </div>
+</body>
+</html>

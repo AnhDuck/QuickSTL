@@ -1,0 +1,22 @@
+{
+  "version": "3.00.0",
+  "timestamp": "2026-01-11T22:33:02.759679",
+  "action": "export",
+  "engine": "STL Only",
+  "quality": "Legacy",
+  "quality_applied": {
+    "mode": "Legacy",
+    "target": "STL Only",
+    "custom": {}
+  },
+  "prefer_selection": true,
+  "doc_key": "datafile:urn:adsk.wipprod:dm.lineage:k3fhVchbRxGg_g4MG_pmIw",
+  "export_folder": "C:/Users/Bill/Desktop/Bambu Labs Gcode/IMPROVEMENTS",
+  "file_name": "BANKERS BRACKET.stl",
+  "file_path": "C:/Users/Bill/Desktop/Bambu Labs Gcode/IMPROVEMENTS\\BANKERS BRACKET.stl",
+  "file_size_bytes": 95384,
+  "stl_is_binary": true,
+  "stl_triangles": 1906,
+  "stl_vertices": 5718,
+  "entity_name": "BANKERS BRACKET"
+}
