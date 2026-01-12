@@ -18,6 +18,8 @@ class AddinState:
         self.last_activity_reason = ""
         self.last_idle_log_ts = 0.0
         self.idle_last_elapsed_s = 0.0
+        self.idle_handler = None
+        self.idle_debug_events = []
 
 
 STATE = AddinState()

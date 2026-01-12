@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+from typing import Optional
 
 from .config import current_doc_key, get_doc_folder
 from .constants import ADDIN_VERSION
@@ -20,6 +21,31 @@ def write_diag_file(context: dict, open_after: bool = False) -> None:
                 log(f"Open diag file failed: {exc}")
     except Exception as exc:
         log(f"Write diag failed: {exc}")
+
+
+def snapshot_idle_state() -> dict:
+    return {
+        "idle_active": STATE.idle_active,
+        "idle_timeout_s": STATE.idle_timeout_s,
+        "idle_log_interval_s": STATE.idle_log_interval_s,
+        "last_activity_ts": STATE.last_activity_ts,
+        "last_activity_reason": STATE.last_activity_reason,
+        "last_idle_log_ts": STATE.last_idle_log_ts,
+        "idle_last_elapsed_s": STATE.idle_last_elapsed_s,
+        "active_command_set": STATE.active_command is not None,
+        "idle_debug_events": list(STATE.idle_debug_events),
+    }
+
+
+def write_idle_diag(event: str, details: Optional[dict] = None) -> None:
+    payload = {
+        "version": ADDIN_VERSION,
+        "timestamp": datetime.datetime.now().isoformat(),
+        "event": event,
+        "details": details or {},
+        "idle_state": snapshot_idle_state(),
+    }
+    write_diag_file(payload, open_after=False)
 
 
 def snapshot_common(
