@@ -7,7 +7,7 @@ import adsk.fusion
 from .analysis import analyze_stl
 from .config import add_clicks_saved, resolve_export_dir, safe_filename
 from .constants import ADDIN_NAME, ADDIN_VERSION
-from .diagnostics import snapshot_common, write_diag_file
+from .diagnostics import append_debug_event, record_export_snapshot, snapshot_common
 from .logging_utils import log
 from .obj_stl import export_via_obj_then_stl
 from .slicer import autodetect_slicer_path, launch_slicer
@@ -107,7 +107,12 @@ def do_export_to_path(
 
         stl_info = analyze_stl(full)
         snap = snapshot_common("export", engine, applied, raw_name, full, stl_info)
-        write_diag_file(snap, open_after=False)
+        record_export_snapshot(snap)
+        append_debug_event(
+            "info",
+            "Export completed",
+            {"action": "export", "file_path": full, "engine": engine},
+        )
 
         if inputs:
             add_clicks_saved(5, inputs)
@@ -163,7 +168,12 @@ def export_and_send(
         path,
         stl_info,
     )
-    write_diag_file(snap, open_after=False)
+    record_export_snapshot(snap)
+    append_debug_event(
+        "info",
+        "Send to slicer completed",
+        {"action": "send", "file_path": path, "slicer": name},
+    )
 
     if inputs:
         add_clicks_saved(5, inputs)
@@ -172,6 +182,7 @@ def export_and_send(
 
 def handle_export_error(action: str, error: Exception) -> None:
     log(f"{action} failed: {error}")
+    append_debug_event("error", f"{action} failed", {"error": str(error)})
     STATE.ui.messageBox(
         f"❌ {action} failed.\n\n{error}\n\n{traceback.format_exc()}",
         f"{ADDIN_NAME} v{ADDIN_VERSION}",

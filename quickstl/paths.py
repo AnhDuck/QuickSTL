@@ -27,9 +27,5 @@ def config_path() -> str:
     return os.path.join(addin_dir(), CONFIG_FILENAME)
 
 
-def diag_path() -> str:
-    return os.path.join(addin_dir(), "quickstl_diag.json")
-
-
-def log_path() -> str:
-    return os.path.join(addin_dir(), "quickstl_errors.log")
+def debug_path() -> str:
+    return os.path.join(addin_dir(), "debug.json")

@@ -10,6 +10,7 @@ class AddinState:
         self.handlers = []
         self.busy = False
         self.config = copy.deepcopy(DEFAULT_CONFIG)
+        self.command = None
 
 
 STATE = AddinState()
