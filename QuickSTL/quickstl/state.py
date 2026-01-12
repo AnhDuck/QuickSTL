@@ -11,7 +11,6 @@ class AddinState:
         self.busy = False
         self.config = copy.deepcopy(DEFAULT_CONFIG)
         self.command = None
-        self.idle_monitor = None
 
 
 STATE = AddinState()

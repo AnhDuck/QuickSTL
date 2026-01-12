@@ -4,7 +4,6 @@ import adsk.core
 from .config import get_doc_folder, resolve_export_dir, save_config, set_doc_folder
 from .constants import ADDIN_NAME, ADDIN_VERSION, CMD_ID, CMD_NAME, QUALITY_CHOICES, SLICER_CHOICES
 from .diagnostics import append_debug_event
-from .idle import IdleMonitor
 from .dialogs import pick_file_dialog, pick_folder_dialog
 from .export import do_export_to_path, export_and_send, handle_export_error
 from .logging_utils import log
@@ -19,6 +18,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
     def notify(self, args: adsk.core.CommandCreatedEventArgs):
         cmd = args.command
         inputs = cmd.commandInputs
+        append_debug_event("ui", "command_created", {"command": CMD_ID})
         try:
             cmd.okButtonText = "OK"
         except Exception:
@@ -87,6 +87,13 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
         g3c = g3.children
         send_btn = g3c.addBoolValueInput("sendBtn", "Send to slicer", False, "", False)
         export_btn = g3c.addBoolValueInput("exportBtn", "Export STL", False, "", False)
+        auto_close = g3c.addBoolValueInput(
+            "autoCloseAfterExport",
+            "Auto-close after export/send",
+            True,
+            "",
+            STATE.config.get("auto_close_after_export", True),
+        )
         clicks_tb = g3c.addTextBoxCommandInput(
             "clicksSavedText",
             "",
@@ -99,17 +106,6 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
         except Exception:
             pass
         diag_btn = g3c.addBoolValueInput("diagBtn", "Debug", False, "", False)
-        idle_timer = g3c.addTextBoxCommandInput(
-            "idleCountdown",
-            "Auto-close in",
-            "",
-            1,
-            True,
-        )
-        try:
-            idle_timer.isFullWidth = True
-        except Exception:
-            pass
 
         try:
             folder_disp.tooltip = "This folder is saved for THIS document. Use “Browse…” to change."
@@ -128,9 +124,9 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             browse_slicer.tooltip = "Pick the slicer executable (.exe)."
             export_btn.tooltip = "Export STL and show a success toast with live preview."
             send_btn.tooltip = "Export STL, then launch and focus the slicer. No toast unless it fails."
+            auto_close.tooltip = "When enabled, close Quick STL after export/send."
             clicks_tb.tooltip = "Estimated clicks saved (assumes 5 per export or send)."
-            diag_btn.tooltip = "Open debug.json (export history, idle state, errors)."
-            idle_timer.tooltip = "Debug countdown to auto-close (resets on interaction)."
+            diag_btn.tooltip = "Open debug.json (export history, errors)."
             cmd.tooltip = f"Quick STL v{ADDIN_VERSION} — OBJ→STL quality + debug info."
         except Exception:
             pass
@@ -141,28 +137,10 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
         on_exec = CommandExecuteHandler()
         cmd.execute.add(on_exec)
         STATE.handlers.append(on_exec)
+        STATE.command = cmd
         on_destroy = CommandDestroyHandler()
         cmd.destroy.add(on_destroy)
         STATE.handlers.append(on_destroy)
-        try:
-            if CommandMouseMoveHandler:
-                on_mouse = CommandMouseMoveHandler()
-                cmd.mouseMove.add(on_mouse)
-                STATE.handlers.append(on_mouse)
-        except Exception:
-            pass
-        try:
-            on_activate = CommandActivateHandler()
-            cmd.activate.add(on_activate)
-            STATE.handlers.append(on_activate)
-        except Exception:
-            pass
-
-        if STATE.idle_monitor:
-            STATE.idle_monitor.stop("command_reopened")
-        STATE.command = cmd
-        STATE.idle_monitor = IdleMonitor()
-        STATE.idle_monitor.start(cmd, inputs)
 
 
 class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
@@ -170,8 +148,8 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
         try:
             ip = args.input
             inputs = args.inputs
-            if STATE.idle_monitor and ip and ip.id != "idleCountdown":
-                STATE.idle_monitor.record_interaction("input_changed", ip.id)
+            if ip:
+                append_debug_event("ui", "input_changed", {"input_id": ip.id})
 
             if ip.id == "browseBtn":
                 chosen = pick_folder_dialog("Choose export folder (saved for this document)")
@@ -249,6 +227,7 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
                     return
                 b.value = False
                 try:
+                    append_debug_event("info", "export_clicked", {})
                     fld = adsk.core.StringValueCommandInput.cast(
                         find_input(inputs, "folderDisp")
                     )
@@ -261,6 +240,7 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
                     do_export_to_path(
                         folder_override=folder, skip_toast=False, inputs=inputs
                     )
+                    maybe_auto_close("export")
                 except Exception as exc:
                     handle_export_error("Export STL", exc)
 
@@ -270,6 +250,7 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
                     return
                 b.value = False
                 try:
+                    append_debug_event("info", "send_clicked", {})
                     fld = adsk.core.StringValueCommandInput.cast(
                         find_input(inputs, "folderDisp")
                     )
@@ -279,9 +260,21 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
                         if fld:
                             fld.value = folder
                     set_doc_folder(folder)
-                    export_and_send(folder_override=folder, inputs=inputs)
+                    if export_and_send(folder_override=folder, inputs=inputs):
+                        maybe_auto_close("send")
                 except Exception as exc:
                     handle_export_error("Send to slicer", exc)
+
+            elif ip.id == "autoCloseAfterExport":
+                b = adsk.core.BoolValueCommandInput.cast(ip)
+                if b:
+                    STATE.config["auto_close_after_export"] = bool(b.value)
+                    save_config()
+                    append_debug_event(
+                        "info",
+                        "auto_close_setting_changed",
+                        {"enabled": bool(b.value)},
+                    )
 
             elif ip.id == "diagBtn":
                 try:
@@ -312,8 +305,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             pref = adsk.core.BoolValueCommandInput.cast(find_input(inputs, "preferSel"))
             STATE.config["prefer_selection"] = bool(pref.value) if pref else True
             save_config()
-            if STATE.idle_monitor:
-                STATE.idle_monitor.record_interaction("execute", "ok")
+            append_debug_event("ui", "command_executed", {})
         except Exception as exc:
             log(f"Execute (OK) error: {exc}")
 
@@ -321,34 +313,29 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
 class CommandDestroyHandler(adsk.core.CommandEventHandler):
     def notify(self, args: adsk.core.CommandEventArgs):
         try:
-            if STATE.idle_monitor:
-                STATE.idle_monitor.stop("command_destroyed")
-                STATE.idle_monitor = None
             STATE.command = None
             append_debug_event("ui", "Command destroyed", {"command": CMD_ID})
         except Exception as exc:
             log(f"Command destroy error: {exc}")
 
 
-try:
-    class CommandMouseMoveHandler(adsk.core.MouseEventHandler):
-        def notify(self, args: adsk.core.MouseEventArgs):
-            try:
-                if STATE.idle_monitor:
-                    STATE.idle_monitor.record_interaction("mouse_move", "")
-            except Exception as exc:
-                log(f"Mouse move error: {exc}")
-except Exception:
-    CommandMouseMoveHandler = None
-
-
-class CommandActivateHandler(adsk.core.CommandEventHandler):
-    def notify(self, args: adsk.core.CommandEventArgs):
-        try:
-            if STATE.idle_monitor:
-                STATE.idle_monitor.record_interaction("activate", "")
-        except Exception as exc:
-            log(f"Command activate error: {exc}")
+def maybe_auto_close(reason: str) -> None:
+    if not STATE.config.get("auto_close_after_export", True):
+        append_debug_event("info", "auto_close_skipped", {"reason": reason})
+        return
+    if not STATE.command:
+        append_debug_event("warning", "auto_close_missing_command", {"reason": reason})
+        return
+    try:
+        append_debug_event("info", "auto_close_attempt", {"reason": reason})
+        STATE.command.terminate()
+        append_debug_event("info", "auto_close_triggered", {"reason": reason})
+    except Exception as exc:
+        append_debug_event(
+            "error",
+            "auto_close_failed",
+            {"reason": reason, "error": str(exc)},
+        )
 
 
 def ensure_removed(ui: adsk.core.UserInterface, cid: str) -> None:

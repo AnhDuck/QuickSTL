@@ -50,9 +50,6 @@ def stop(context):
                 pal.deleteMe()
             except Exception:
                 pass
-        if STATE.idle_monitor:
-            STATE.idle_monitor.stop("addin_stopped")
-            STATE.idle_monitor = None
         update_ui_state({"command_visible": False, "last_event": "addin_stopped"})
         append_debug_event("info", "Add-in stopped", {"version": ADDIN_VERSION})
     except Exception:

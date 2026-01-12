@@ -1,6 +1,5 @@
 ADDIN_NAME = "Quick STL"
 ADDIN_VERSION = "3.00.0"
-IDLE_TIMEOUT_S = 30
 
 CMD_ID = "quickstl_export_cmd"
 CMD_NAME = "Quick STL"
@@ -31,6 +30,7 @@ DEFAULT_CONFIG = {
     "prefer_selection": True,
     "per_doc_folders": {},
     "clicks_saved": 0,
+    "auto_close_after_export": True,
     "quality": "Legacy",  # Legacy uses STL Only; other presets use OBJ→STL
     "slicer": {
         "name": "OrcaSlicer",
