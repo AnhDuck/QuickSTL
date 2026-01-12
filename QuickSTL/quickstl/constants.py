@@ -25,6 +25,10 @@ THREE_FILE = "three.min.js"
 SLICER_CHOICES = ["OrcaSlicer", "SuperSlicer", "Bambu Studio"]
 QUALITY_CHOICES = ["Legacy", "Low", "Medium", "High", "VeryHigh", "Ultra"]
 
+# Idle auto-close behavior (seconds)
+IDLE_TIMEOUT_S = 30.0
+IDLE_LOG_INTERVAL_S = 5.0
+
 DEFAULT_CONFIG = {
     "export_dir": "",
     "prefer_selection": True,

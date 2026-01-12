@@ -5,6 +5,7 @@ from .config import get_doc_folder, resolve_export_dir, save_config, set_doc_fol
 from .constants import ADDIN_NAME, ADDIN_VERSION, CMD_ID, CMD_NAME, QUALITY_CHOICES, SLICER_CHOICES
 from .dialogs import pick_file_dialog, pick_folder_dialog
 from .export import do_export_to_path, export_and_send, handle_export_error
+from .idle import mark_command_active, mark_command_inactive, record_activity
 from .logging_utils import log
 from .paths import icon_folder
 from .slicer import autodetect_slicer_path
@@ -21,6 +22,8 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             cmd.okButtonText = "OK"
         except Exception:
             pass
+        STATE.active_command = cmd
+        mark_command_active("command_created")
 
         g1 = inputs.addGroupCommandInput("grpExport", "Export Destination")
         g1.isExpanded = True
@@ -127,6 +130,9 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
         on_exec = CommandExecuteHandler()
         cmd.execute.add(on_exec)
         STATE.handlers.append(on_exec)
+        on_destroy = CommandDestroyHandler()
+        cmd.destroy.add(on_destroy)
+        STATE.handlers.append(on_destroy)
 
 
 class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
@@ -134,6 +140,7 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
         try:
             ip = args.input
             inputs = args.inputs
+            record_activity(f"input:{ip.id}")
 
             if ip.id == "browseBtn":
                 chosen = pick_folder_dialog("Choose export folder (saved for this document)")
@@ -270,12 +277,21 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
 class CommandExecuteHandler(adsk.core.CommandEventHandler):
     def notify(self, args: adsk.core.CommandEventArgs):
         try:
+            record_activity("command_execute")
             inputs = args.command.commandInputs
             pref = adsk.core.BoolValueCommandInput.cast(find_input(inputs, "preferSel"))
             STATE.config["prefer_selection"] = bool(pref.value) if pref else True
             save_config()
         except Exception as exc:
             log(f"Execute (OK) error: {exc}")
+
+
+class CommandDestroyHandler(adsk.core.CommandEventHandler):
+    def notify(self, args: adsk.core.CommandEventArgs):
+        try:
+            mark_command_inactive("command_destroy")
+        except Exception as exc:
+            log(f"Command destroy error: {exc}")
 
 
 def ensure_removed(ui: adsk.core.UserInterface, cid: str) -> None:

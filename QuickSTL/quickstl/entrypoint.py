@@ -5,6 +5,7 @@ import adsk.core
 from .command import ensure_removed, wire_commands
 from .config import load_config
 from .constants import ADDIN_NAME, ADDIN_VERSION, CMD_ID, TOAST_ID
+from .idle import stop_idle_monitoring, start_idle_monitoring
 from .state import STATE
 
 
@@ -15,6 +16,7 @@ def run(context):
         load_config()
         ensure_removed(STATE.ui, CMD_ID)
         wire_commands(STATE.ui)
+        start_idle_monitoring(STATE.app)
     except Exception:
         if STATE.ui:
             STATE.ui.messageBox(
@@ -25,6 +27,7 @@ def run(context):
 def stop(context):
     try:
         ui = adsk.core.Application.get().userInterface
+        stop_idle_monitoring(adsk.core.Application.get())
         ensure_removed(ui, CMD_ID)
         pal = ui.palettes.itemById(TOAST_ID)
         if pal:
