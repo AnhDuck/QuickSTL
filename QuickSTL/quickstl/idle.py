@@ -1,5 +1,5 @@
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import adsk.core
 
@@ -83,7 +83,7 @@ def close_quickstl_ui(reason: str, idle_elapsed: float) -> None:
 
 
 class IdleCloseHandler(adsk.core.IdleEventHandler):
-    def notify(self, args: adsk.core.IdleEventArgs) -> None:
+    def notify(self, args: Any) -> None:
         try:
             if not STATE.idle_active:
                 return
