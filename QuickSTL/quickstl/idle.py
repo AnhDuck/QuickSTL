@@ -87,10 +87,6 @@ class IdleMonitor:
             self.auto_close_triggered = True
             self._push_state(remaining)
             self._auto_close()
-        try:
-            adsk.core.Application.get().fireIdleEvent()
-        except Exception:
-            pass
 
     def _ensure_idle_handler(self):
         try:
