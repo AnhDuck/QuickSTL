@@ -26,6 +26,16 @@ def write_diag_file(context: dict, open_after: bool = False) -> None:
         log(f"Write diag failed: {exc}")
 
 
+def ensure_debug_file_exists(context: Optional[dict] = None) -> None:
+    payload = {
+        "type": "startup",
+        "version": ADDIN_VERSION,
+        "timestamp": datetime.datetime.now().isoformat(),
+        "context": context or {},
+    }
+    write_diag_file(payload, open_after=False)
+
+
 def snapshot_idle_state() -> dict:
     return {
         "idle_active": STATE.idle_active,
