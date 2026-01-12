@@ -18,7 +18,6 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
     def notify(self, args: adsk.core.CommandCreatedEventArgs):
         cmd = args.command
         inputs = cmd.commandInputs
-        append_debug_event("ui", "command_created", {"command": CMD_ID})
         try:
             cmd.okButtonText = "OK"
         except Exception:
@@ -148,9 +147,6 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
         try:
             ip = args.input
             inputs = args.inputs
-            if ip:
-                append_debug_event("ui", "input_changed", {"input_id": ip.id})
-
             if ip.id == "browseBtn":
                 chosen = pick_folder_dialog("Choose export folder (saved for this document)")
                 if chosen:
