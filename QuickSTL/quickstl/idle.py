@@ -1,4 +1,6 @@
 import datetime
+import threading
+import time
 
 import adsk.core
 
@@ -20,6 +22,18 @@ except Exception:
     IdleEventHandler = None
 
 
+try:
+    class IdleCustomEventHandler(adsk.core.CustomEventHandler):
+        def __init__(self, monitor):
+            super().__init__()
+            self._monitor = monitor
+
+        def notify(self, args: adsk.core.CustomEventArgs):
+            self._monitor.tick()
+except Exception:
+    IdleCustomEventHandler = None
+
+
 class IdleMonitor:
     def __init__(self, timeout_s: int = IDLE_TIMEOUT_S):
         self.timeout_s = timeout_s
@@ -31,6 +45,10 @@ class IdleMonitor:
         self.active = False
         self._idle_handler = None
         self._last_remaining = None
+        self._custom_handler = None
+        self._custom_event_id = "quickstl_idle_tick"
+        self._thread = None
+        self._stop_event = None
 
     def start(self, command: adsk.core.Command, inputs: adsk.core.CommandInputs):
         now = datetime.datetime.now()
@@ -69,6 +87,7 @@ class IdleMonitor:
                 app.idle.remove(self._idle_handler)
         except Exception:
             pass
+        self._stop_thread()
 
     def record_interaction(self, source: str, detail: str = ""):
         if not self.active:
@@ -97,8 +116,47 @@ class IdleMonitor:
             if not self._idle_handler and IdleEventHandler:
                 self._idle_handler = IdleEventHandler(self)
                 app.idle.add(self._idle_handler)
+                return
         except Exception as exc:
             log(f"Idle handler setup failed: {exc}")
+        self._ensure_custom_handler()
+
+    def _ensure_custom_handler(self):
+        if not IdleCustomEventHandler:
+            log("Idle custom event handler unavailable.")
+            return
+        try:
+            app = adsk.core.Application.get()
+            if not self._custom_handler:
+                app.registerCustomEvent(self._custom_event_id)
+                self._custom_handler = IdleCustomEventHandler(self)
+                app.customEvent.add(self._custom_handler)
+            self._start_thread()
+        except Exception as exc:
+            log(f"Idle custom event setup failed: {exc}")
+
+    def _start_thread(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._tick_loop, daemon=True)
+        self._thread.start()
+
+    def _stop_thread(self):
+        if self._stop_event:
+            self._stop_event.set()
+        self._stop_event = None
+        self._thread = None
+
+    def _tick_loop(self):
+        while self.active and self._stop_event and not self._stop_event.is_set():
+            time.sleep(1.0)
+            try:
+                app = adsk.core.Application.get()
+                app.fireCustomEvent(self._custom_event_id)
+            except Exception as exc:
+                log(f"Idle custom event fire failed: {exc}")
+                break
 
     def _update_countdown(self, remaining: int):
         self._last_remaining = remaining
